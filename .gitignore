@@ -27,3 +27,8 @@ dist-ssr
 .env
 .env.local
 .vercel
+
+# rust / anchor build artifacts
+anchor/target
+anchor/.anchor
+anchor/test-ledger
