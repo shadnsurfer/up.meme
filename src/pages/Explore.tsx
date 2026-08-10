@@ -10,7 +10,7 @@ import { useSearchOpen } from '../components/SearchPalette';
 type SortKey = 'recent' | 'newest' | 'mcap' | 'volume';
 
 const sortOptions = [
-  { id: 'recent', label: 'blinking' },
+  { id: 'recent', label: 'climbing' },
   { id: 'newest', label: 'newest' },
   { id: 'mcap', label: 'market cap' },
   { id: 'volume', label: 'volume' },
@@ -18,18 +18,18 @@ const sortOptions = [
 
 const PAGE_SIZE = 6;
 
-/** fraction of the blink window elapsed, 0..1 (mock: derive from endsAt) */
-function blinkProgress(l: Launch): number {
-  if (l.blinkEndsAt === null) return 1;
+/** fraction of the climb window elapsed, 0..1 (mock: derive from endsAt) */
+function climbProgress(l: Launch): number {
+  if (l.climbEndsAt === null) return 1;
   const now = Math.floor(Date.now() / 1000);
-  const total = l.blinkEndsAt - l.createdAt;
+  const total = l.climbEndsAt - l.createdAt;
   if (total <= 0) return 1;
   return Math.min(1, Math.max(0.04, (now - l.createdAt) / total));
 }
 
 function LaunchCard({ launch, index }: { launch: Launch; index: number }) {
-  const blinking = launch.blinkEndsAt !== null;
-  const progress = blinkProgress(launch);
+  const climbing = launch.climbEndsAt !== null;
+  const progress = climbProgress(launch);
 
   return (
     <li className="animate-in-slide" style={{ animationDelay: `${Math.min(index, 10) * 35}ms` }}>
@@ -42,9 +42,9 @@ function LaunchCard({ launch, index }: { launch: Launch; index: number }) {
             </span>
           </div>
           <div className="absolute left-2 top-2 z-10 flex items-center gap-1">
-            {blinking ? (
+            {climbing ? (
               <span className="rounded-full bg-black/70 px-2 py-1 text-[10px] font-semibold tracking-tight text-pump backdrop-blur-md">
-                blinking
+                climbing
               </span>
             ) : (
               <span className="rounded-full bg-black/70 px-2 py-1 text-[10px] font-semibold tracking-tight text-white/80 backdrop-blur-md">
@@ -73,18 +73,18 @@ function LaunchCard({ launch, index }: { launch: Launch; index: number }) {
             <span className="text-[11px] text-ink-ghost">mcap</span>
           </div>
 
-          {/* blink progress */}
+          {/* climb progress */}
           <div className="mt-1.5 flex items-center gap-2">
             <span className="relative h-1 flex-1 overflow-hidden rounded-full bg-white/[0.09]">
               <span
                 className={`block h-full rounded-full transition-all duration-500 ${
-                  blinking ? 'bg-pump/70' : 'bg-white/25'
+                  climbing ? 'bg-pump/70' : 'bg-white/25'
                 }`}
                 style={{ width: `${progress * 100}%` }}
               />
             </span>
             <span className="flex-none font-mono text-[11px] tabular-nums text-ink-ghost">
-              {blinking ? <Countdown endsAt={launch.blinkEndsAt!} /> : 'closed'}
+              {climbing ? <Countdown endsAt={launch.climbEndsAt!} /> : 'live'}
             </span>
           </div>
 
@@ -172,8 +172,8 @@ export function Explore() {
     }
     list.sort((a, b) => {
       if (sort === 'recent') {
-        const ab = a.blinkEndsAt !== null ? 0 : 1;
-        const bb = b.blinkEndsAt !== null ? 0 : 1;
+        const ab = a.climbEndsAt !== null ? 0 : 1;
+        const bb = b.climbEndsAt !== null ? 0 : 1;
         if (ab !== bb) return ab - bb;
         return b.volume24h - a.volume24h;
       }
@@ -184,8 +184,8 @@ export function Explore() {
     return list;
   }, [query, sort]);
 
-  const active = results.filter((l) => l.blinkEndsAt !== null);
-  const graduated = results.filter((l) => l.blinkEndsAt === null);
+  const active = results.filter((l) => l.climbEndsAt !== null);
+  const graduated = results.filter((l) => l.climbEndsAt === null);
 
   return (
     <div className="animate-in-slide flex flex-col gap-4">
@@ -229,12 +229,12 @@ export function Explore() {
         </a>
       </div>
 
-      {/* active blinks panel */}
+      {/* active climbs panel */}
       <section className="float grid gap-5 p-5 sm:p-6">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div className="grid min-w-0 gap-1.5">
             <div className="flex flex-wrap items-center gap-2.5">
-              <h1 className="text-[22px] font-normal tracking-tight text-ink">blinking now</h1>
+              <h1 className="text-[22px] font-normal tracking-tight text-ink">climbing now</h1>
               <span className="grid h-7 min-w-7 place-items-center rounded-full bg-white/[0.07] px-2 font-mono text-[12px] tabular-nums text-ink-mute">
                 <RollingNumber value={String(active.length)} />
               </span>
@@ -252,8 +252,8 @@ export function Explore() {
           <SkeletonGrid />
         ) : active.length === 0 ? (
           <div className="grid justify-items-start gap-4 px-1 py-6">
-            <p className="text-[13px] font-semibold text-ink-dim">No active blinks right now.</p>
-            <p className="text-[12px] text-ink-ghost">Be the first. Don’t blink.</p>
+            <p className="text-[13px] font-semibold text-ink-dim">No climbs live right now.</p>
+            <p className="text-[12px] text-ink-ghost">Be the first. The only way is up.</p>
             <a href="/launch" className="btn-pump min-w-[160px] px-5 py-2.5 text-center text-[13px]">
               launch a coin
             </a>
@@ -290,7 +290,7 @@ export function Explore() {
                 </span>
               </div>
               <p className="max-w-[42ch] text-[13px] leading-relaxed text-ink-mute">
-                the blink closed — these trade freely everywhere.
+                the climb ended — these trade freely everywhere.
               </p>
             </div>
           </header>

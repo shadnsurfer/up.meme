@@ -60,14 +60,14 @@ export function SearchTrigger({
 }
 
 function StatusChip({ launch }: { launch: Launch }) {
-  const blinking = launch.blinkEndsAt !== null;
+  const climbing = launch.climbEndsAt !== null;
   return (
     <span
       className={`flex-none rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-tight ${
-        blinking ? 'bg-pump/[0.14] text-pump' : 'bg-white/[0.07] text-ink-mute'
+        climbing ? 'bg-pump/[0.14] text-pump' : 'bg-white/[0.07] text-ink-mute'
       }`}
     >
-      {blinking ? 'blinking' : 'open'}
+      {climbing ? 'climbing' : 'open'}
     </span>
   );
 }

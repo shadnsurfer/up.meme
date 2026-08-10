@@ -1,7 +1,7 @@
 import { useRef, useState, type DragEvent } from 'react';
 import { Countdown } from '../components/Countdown';
 
-const blinkPresets = [
+const climbPresets = [
   { label: '15m', seconds: 900 },
   { label: '1h', seconds: 3600 },
   { label: '6h', seconds: 21600 },
@@ -20,7 +20,7 @@ export function Launch() {
   const [description, setDescription] = useState('');
   const [telegram, setTelegram] = useState('');
   const [website, setWebsite] = useState('');
-  const [blink, setBlink] = useState(3600);
+  const [climb, setClimb] = useState(3600);
   const [state, setState] = useState<LaunchState>('idle');
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -182,18 +182,18 @@ export function Launch() {
             </div>
           </div>
 
-          {/* blink window */}
+          {/* climb window */}
           <div className="animate-in-slide stagger-4">
             <label className="mb-1.5 block text-[12px] font-semibold text-ink-mute">
-              the blink — how long only verified single wallets can buy
+              the climb — how long only verified single wallets can buy
             </label>
             <div className="flex flex-wrap gap-2">
-              {blinkPresets.map((p) => (
+              {climbPresets.map((p) => (
                 <button
                   key={p.seconds}
-                  onClick={() => setBlink(p.seconds)}
+                  onClick={() => setClimb(p.seconds)}
                   className={`well rounded-full px-4 py-2 font-mono text-[12px] font-bold transition-all duration-150 hover:bg-white/[0.09] active:scale-95 ${
-                    blink === p.seconds
+                    climb === p.seconds
                       ? 'border-pump/60 bg-pump/10 text-pump shadow-[0_0_16px_rgba(95,203,136,0.15)]'
                       : 'text-ink-mute'
                   }`}
@@ -236,7 +236,7 @@ export function Launch() {
               <span className="text-[10px] font-bold uppercase tracking-widest text-ink-ghost">
                 live preview
               </span>
-              <span className="blink-dot h-1.5 w-1.5 rounded-full bg-pump" />
+              <span className="live-dot h-1.5 w-1.5 rounded-full bg-pump" />
             </div>
             <div className="flex items-center gap-3">
               <div className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-full border border-white/[0.08] bg-raised text-2xl">
@@ -264,18 +264,18 @@ export function Launch() {
                 <div className="font-mono font-bold tabular-nums text-ink">1B</div>
               </div>
               <div>
-                <div className="text-[10px] font-semibold uppercase tracking-widest text-ink-ghost">blink</div>
+                <div className="text-[10px] font-semibold uppercase tracking-widest text-ink-ghost">climb</div>
                 <div className="font-mono font-bold text-pump-soft">
-                  {blinkPresets.find((p) => p.seconds === blink)?.label}
+                  {climbPresets.find((p) => p.seconds === climb)?.label}
                 </div>
               </div>
             </div>
 
             {state === 'done' && (
               <div className="animate-rise-check mt-4 rounded-2xl border border-pump/25 bg-pump/10 p-3 text-center">
-                <div className="text-[12px] font-bold text-pump">the blink is open</div>
+                <div className="text-[12px] font-bold text-pump">the climb is on</div>
                 <div className="mt-1">
-                  <Countdown endsAt={Math.floor(Date.now() / 1000) + blink} />
+                  <Countdown endsAt={Math.floor(Date.now() / 1000) + climb} />
                 </div>
               </div>
             )}

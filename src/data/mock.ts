@@ -7,8 +7,8 @@ export type Launch = {
   marketCap: number;
   volume24h: number;
   holders: number;
-  /** unix seconds when the blink window ends; null = already migrated */
-  blinkEndsAt: number | null;
+  /** unix seconds when the climb window ends; null = already migrated */
+  climbEndsAt: number | null;
   createdAt: number;
   official?: boolean;
 };
@@ -25,7 +25,7 @@ export const mockLaunches: Launch[] = [
     marketCap: 84200,
     volume24h: 152000,
     holders: 2140,
-    blinkEndsAt: null,
+    climbEndsAt: null,
     createdAt: now - 60 * 60 * 24 * 9,
     official: true,
   },
@@ -38,7 +38,7 @@ export const mockLaunches: Launch[] = [
     marketCap: 5120,
     volume24h: 2310,
     holders: 84,
-    blinkEndsAt: now + 60 * 42,
+    climbEndsAt: now + 60 * 42,
     createdAt: now - 60 * 18,
   },
   {
@@ -50,7 +50,7 @@ export const mockLaunches: Launch[] = [
     marketCap: 6480,
     volume24h: 5120,
     holders: 231,
-    blinkEndsAt: now + 60 * 60 * 5 + 60 * 11,
+    climbEndsAt: now + 60 * 60 * 5 + 60 * 11,
     createdAt: now - 60 * 60 * 2,
   },
   {
@@ -62,7 +62,7 @@ export const mockLaunches: Launch[] = [
     marketCap: 5030,
     volume24h: 410,
     holders: 19,
-    blinkEndsAt: now + 60 * 3,
+    climbEndsAt: now + 60 * 3,
     createdAt: now - 60 * 7,
   },
   {
@@ -74,7 +74,7 @@ export const mockLaunches: Launch[] = [
     marketCap: 12900,
     volume24h: 18400,
     holders: 612,
-    blinkEndsAt: now + 60 * 60 * 26,
+    climbEndsAt: now + 60 * 60 * 26,
     createdAt: now - 60 * 60 * 22,
   },
   {
@@ -86,7 +86,7 @@ export const mockLaunches: Launch[] = [
     marketCap: 5200,
     volume24h: 980,
     holders: 44,
-    blinkEndsAt: now + 60 * 9,
+    climbEndsAt: now + 60 * 9,
     createdAt: now - 60 * 51,
   },
   {
@@ -98,7 +98,7 @@ export const mockLaunches: Launch[] = [
     marketCap: 34200,
     volume24h: 96100,
     holders: 1480,
-    blinkEndsAt: null,
+    climbEndsAt: null,
     createdAt: now - 60 * 60 * 30,
   },
   {
@@ -110,7 +110,7 @@ export const mockLaunches: Launch[] = [
     marketCap: 21800,
     volume24h: 45200,
     holders: 890,
-    blinkEndsAt: null,
+    climbEndsAt: null,
     createdAt: now - 60 * 60 * 55,
   },
   {
@@ -122,7 +122,7 @@ export const mockLaunches: Launch[] = [
     marketCap: 7600,
     volume24h: 3300,
     holders: 152,
-    blinkEndsAt: now + 60 * 60 * 14,
+    climbEndsAt: now + 60 * 60 * 14,
     createdAt: now - 60 * 60 * 10,
   },
   {
@@ -134,7 +134,7 @@ export const mockLaunches: Launch[] = [
     marketCap: 5400,
     volume24h: 890,
     holders: 61,
-    blinkEndsAt: now + 60 * 60 * 44,
+    climbEndsAt: now + 60 * 60 * 44,
     createdAt: now - 60 * 60 * 4,
   },
   {
@@ -146,7 +146,7 @@ export const mockLaunches: Launch[] = [
     marketCap: 47300,
     volume24h: 61400,
     holders: 1102,
-    blinkEndsAt: null,
+    climbEndsAt: null,
     createdAt: now - 60 * 60 * 70,
   },
   {
@@ -158,7 +158,7 @@ export const mockLaunches: Launch[] = [
     marketCap: 12900,
     volume24h: 8300,
     holders: 340,
-    blinkEndsAt: null,
+    climbEndsAt: null,
     createdAt: now - 60 * 60 * 90,
   },
 ];

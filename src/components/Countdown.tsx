@@ -25,7 +25,7 @@ export function Countdown({ endsAt }: { endsAt: number }) {
 
   return (
     <span className="font-mono text-[13px] font-semibold tabular-nums tracking-tight text-pump-soft">
-      {left === 0 ? 'closing…' : text}
+      {left === 0 ? 'opening…' : text}
     </span>
   );
 }

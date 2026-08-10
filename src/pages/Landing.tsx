@@ -5,7 +5,7 @@ import { RollingNumber } from '../components/RollingNumber';
 import { mockLaunches, formatUsd } from '../data/mock';
 
 export function Landing() {
-  const blinking = mockLaunches.filter((l) => l.blinkEndsAt !== null).length;
+  const climbing = mockLaunches.filter((l) => l.climbEndsAt !== null).length;
   const baseVolume = mockLaunches.reduce((a, l) => a + l.volume24h, 0);
 
   // mock live feed — volume ticks up so the odometer digits roll
@@ -19,7 +19,7 @@ export function Landing() {
 
   const stats = [
     { label: 'launches', value: mockLaunches.length.toString() },
-    { label: 'blinking', value: blinking.toString(), live: true },
+    { label: 'climbing', value: climbing.toString(), live: true },
     { label: 'total volume', value: formatUsd(liveVolume) },
   ];
 
@@ -60,12 +60,12 @@ export function Landing() {
           the fairest launches
           <br />
           on solana.
-          <em className="text-pump"> blink and you'll miss it.</em>
+          <em className="text-pump"> the only way is up.</em>
         </h1>
 
         <p className="animate-in-slide stagger-3 mt-5 max-w-md text-[14px] leading-relaxed text-ink-mute sm:text-[15px]">
           one wallet deploys. one wallet seeds. no bundling, no snipers, no insiders.
-          every coin opens with a blink — a window where only verified people can buy.
+          every coin opens with a climb — a window where only verified people can buy.
         </p>
 
         {/* CTAs */}
@@ -84,7 +84,7 @@ export function Landing() {
             <div key={s.label} className="text-center">
               <div className="font-mono text-[22px] font-extrabold tabular-nums text-ink md:text-[26px]">
                 {s.live && (
-                  <span className="blink-dot mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-pump align-middle shadow-[0_0_10px_rgba(95,203,136,0.8)]" />
+                  <span className="live-dot mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-pump align-middle shadow-[0_0_10px_rgba(95,203,136,0.8)]" />
                 )}
                 <RollingNumber value={s.value} />
               </div>
@@ -105,8 +105,8 @@ export function Landing() {
               >
                 <span>{l.emoji}</span>
                 <span className="font-mono">${l.ticker}</span>
-                <span className={l.blinkEndsAt !== null ? 'text-pump' : 'text-ink-ghost'}>
-                  {l.blinkEndsAt !== null ? 'blinking' : formatUsd(l.marketCap)}
+                <span className={l.climbEndsAt !== null ? 'text-pump' : 'text-ink-ghost'}>
+                  {l.climbEndsAt !== null ? 'climbing' : formatUsd(l.marketCap)}
                 </span>
               </span>
             ))}
