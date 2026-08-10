@@ -1,0 +1,5 @@
+# probe scaffolding: local validator ledgers, throwaway keypairs, logs
+test-ledger/
+*-keypair.json
+*-wallet.json
+*.log
