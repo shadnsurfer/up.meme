@@ -10,7 +10,10 @@ import {
   type ReactNode,
 } from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
-import { formatUsd, mockLaunches, type Launch } from '../data/mock';
+import { displayName, displayTicker, isClimbing, mcapUsd, type LiveLaunch } from '../lib/chain';
+import { useLaunches } from '../lib/hooks';
+import { formatUsd } from '../lib/format';
+import { useNowSeconds } from './Countdown';
 import { PageSweep } from './PageSweep';
 
 const SearchCtx = createContext<() => void>(() => {});
@@ -59,8 +62,8 @@ export function SearchTrigger({
   );
 }
 
-function StatusChip({ launch }: { launch: Launch }) {
-  const climbing = launch.climbEndsAt !== null;
+function StatusChip({ launch, now }: { launch: LiveLaunch; now: number }) {
+  const climbing = isClimbing(launch, now);
   return (
     <span
       className={`flex-none rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-tight ${
@@ -79,19 +82,22 @@ function SearchPalette({ onClose }: { onClose: () => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const activeRef = useRef<HTMLButtonElement>(null);
   const navigate = useNavigate();
+  const { launches } = useLaunches();
+  const now = useNowSeconds();
 
   const results = useMemo(() => {
     const t = q.trim().toLowerCase();
     const list = t
-      ? mockLaunches.filter(
+      ? launches.filter(
           (l) =>
-            l.name.toLowerCase().includes(t) ||
-            l.ticker.toLowerCase().includes(t) ||
-            l.creator.toLowerCase().includes(t),
+            (l.meta?.name ?? '').toLowerCase().includes(t) ||
+            (l.meta?.symbol ?? '').toLowerCase().includes(t) ||
+            l.state.mint.toLowerCase().includes(t) ||
+            l.state.creator.toLowerCase().includes(t),
         )
-      : mockLaunches;
+      : launches;
     return list.slice(0, 8);
-  }, [q]);
+  }, [launches, q]);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -113,8 +119,8 @@ function SearchPalette({ onClose }: { onClose: () => void }) {
   }, [onClose]);
 
   const pick = useCallback(
-    (l: Launch) => {
-      navigate(`/explore?q=${encodeURIComponent(l.ticker)}`);
+    (l: LiveLaunch) => {
+      navigate(`/coin/${l.state.mint}`);
       close();
     },
     [navigate, close],
@@ -172,34 +178,41 @@ function SearchPalette({ onClose }: { onClose: () => void }) {
               <p className="mt-1 text-[12px] text-ink-ghost">try a name, ticker or creator</p>
             </div>
           ) : (
-            results.map((l, i) => (
-              <button
-                key={l.id}
-                ref={i === idx ? activeRef : undefined}
-                onMouseEnter={() => setIdx(i)}
-                onClick={() => pick(l)}
-                className={`animate-row-in flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-colors duration-100 ${
-                  i === idx ? 'bg-white/[0.07]' : ''
-                }`}
-                style={{ animationDelay: `${i * 25}ms` }}
-              >
-                <span className="grid h-9 w-9 flex-none place-items-center rounded-full border border-white/[0.08] bg-raised text-[16px]">
-                  {l.emoji}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[13.5px] font-semibold text-ink">
-                    {l.name}
+            results.map((l, i) => {
+              const mcap = mcapUsd(l);
+              return (
+                <button
+                  key={l.state.mint}
+                  ref={i === idx ? activeRef : undefined}
+                  onMouseEnter={() => setIdx(i)}
+                  onClick={() => pick(l)}
+                  className={`animate-row-in flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-colors duration-100 ${
+                    i === idx ? 'bg-white/[0.07]' : ''
+                  }`}
+                  style={{ animationDelay: `${i * 25}ms` }}
+                >
+                  <span className="grid h-9 w-9 flex-none place-items-center overflow-hidden rounded-full border border-white/[0.08] bg-raised text-[16px]">
+                    {l.meta?.image ? (
+                      <img src={l.meta.image} alt="" className="h-full w-full object-cover" />
+                    ) : (
+                      '👁️'
+                    )}
                   </span>
-                  <span className="block truncate font-mono text-[11.5px] text-ink-mute">
-                    ${l.ticker}
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[13.5px] font-semibold text-ink">
+                      {displayName(l)}
+                    </span>
+                    <span className="block truncate font-mono text-[11.5px] text-ink-mute">
+                      ${displayTicker(l)}
+                    </span>
                   </span>
-                </span>
-                <span className="flex-none font-mono text-[12px] font-bold tabular-nums text-ink-dim">
-                  {formatUsd(l.marketCap)}
-                </span>
-                <StatusChip launch={l} />
-              </button>
-            ))
+                  <span className="flex-none font-mono text-[12px] font-bold tabular-nums text-ink-dim">
+                    {mcap !== null ? formatUsd(mcap) : '···'}
+                  </span>
+                  <StatusChip launch={l} now={now} />
+                </button>
+              );
+            })
           )}
         </div>
 

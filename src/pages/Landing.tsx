@@ -1,29 +1,27 @@
-import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Logo } from '../components/Logo';
 import { RollingNumber } from '../components/RollingNumber';
-import { mockLaunches, formatUsd } from '../data/mock';
+import { useNowSeconds } from '../components/Countdown';
+import { SOL_PRICE_USD, displayTicker, isClimbing, mcapUsd, solRaised } from '../lib/chain';
+import { useLaunches } from '../lib/hooks';
+import { formatUsd } from '../lib/format';
 
 export function Landing() {
-  const climbing = mockLaunches.filter((l) => l.climbEndsAt !== null).length;
-  const baseVolume = mockLaunches.reduce((a, l) => a + l.volume24h, 0);
-
-  // mock live feed — volume ticks up so the odometer digits roll
-  const [liveVolume, setLiveVolume] = useState(baseVolume);
-  useEffect(() => {
-    const t = window.setInterval(() => {
-      setLiveVolume((v) => v + Math.round(Math.random() * 1200) + 60);
-    }, 2600);
-    return () => window.clearInterval(t);
-  }, []);
+  const { launches } = useLaunches();
+  const now = useNowSeconds();
+  const climbing = launches.filter((l) => isClimbing(l, now)).length;
+  // no volume index exists on-chain — net SOL seated in all curves is the
+  // closest real aggregate
+  const totalVolume =
+    (launches.reduce((a, l) => a + solRaised(l), 0n) * BigInt(Math.round(SOL_PRICE_USD))) / 1_000_000_000n;
 
   const stats = [
-    { label: 'launches', value: mockLaunches.length.toString() },
+    { label: 'launches', value: launches.length.toString() },
     { label: 'climbing', value: climbing.toString(), live: true },
-    { label: 'total volume', value: formatUsd(liveVolume) },
+    { label: 'seated in curves', value: formatUsd(Number(totalVolume)) },
   ];
 
-  const tickerItems = [...mockLaunches, ...mockLaunches];
+  const tickerItems = [...launches, ...launches];
 
   return (
     <div className="animate-page-up relative flex min-h-[100dvh] flex-col overflow-hidden bg-void">
@@ -95,23 +93,35 @@ export function Landing() {
           ))}
         </div>
 
-        {/* ticker marquee */}
-        <div className="animate-in-fade stagger-5 marquee mt-10 w-full max-w-3xl md:mt-14">
-          <div className="marquee-track gap-2.5 pr-2.5">
-            {tickerItems.map((l, i) => (
-              <span
-                key={`${l.id}-${i}`}
-                className="well flex items-center gap-2 rounded-full px-3.5 py-1.5 text-[12px] font-semibold text-ink-dim transition hover:bg-white/[0.09] hover:text-ink"
-              >
-                <span>{l.emoji}</span>
-                <span className="font-mono">${l.ticker}</span>
-                <span className={l.climbEndsAt !== null ? 'text-pump' : 'text-ink-ghost'}>
-                  {l.climbEndsAt !== null ? 'climbing' : formatUsd(l.marketCap)}
-                </span>
-              </span>
-            ))}
+        {/* ticker marquee — hidden when the chain has no launches yet */}
+        {tickerItems.length > 0 && (
+          <div className="animate-in-fade stagger-5 marquee mt-10 w-full max-w-3xl md:mt-14">
+            <div className="marquee-track gap-2.5 pr-2.5">
+              {tickerItems.map((l, i) => {
+                const mcap = mcapUsd(l);
+                return (
+                  <Link
+                    to={`/coin/${l.state.mint}`}
+                    key={`${l.state.mint}-${i}`}
+                    className="well flex items-center gap-2 rounded-full px-3.5 py-1.5 text-[12px] font-semibold text-ink-dim transition hover:bg-white/[0.09] hover:text-ink"
+                  >
+                    <span className="grid h-5 w-5 place-items-center overflow-hidden rounded-full text-[13px]">
+                      {l.meta?.image ? (
+                        <img src={l.meta.image} alt="" className="h-full w-full object-cover" />
+                      ) : (
+                        '👁️'
+                      )}
+                    </span>
+                    <span className="font-mono">${displayTicker(l)}</span>
+                    <span className={isClimbing(l, now) ? 'text-pump' : 'text-ink-ghost'}>
+                      {isClimbing(l, now) ? 'climbing' : mcap !== null ? formatUsd(mcap) : '···'}
+                    </span>
+                  </Link>
+                );
+              })}
+            </div>
           </div>
-        </div>
+        )}
 
         <p className="animate-in-fade stagger-5 mt-9 font-mono text-[11px] text-ink-ghost">
           1B supply · 100% seeded · locked liquidity · $5K start · 50% fees to creators

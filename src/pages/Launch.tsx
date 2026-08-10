@@ -1,5 +1,12 @@
-import { useRef, useState, type DragEvent } from 'react';
+import { useMemo, useRef, useState, type DragEvent } from 'react';
+import { generateKeyPairSigner } from '@solana/kit';
 import { Countdown } from '../components/Countdown';
+import { TOTAL_SUPPLY, VIRTUAL_SOL, buyTokensOut } from '../lib/upmeme';
+import { seedMetaCache } from '../lib/chain';
+import { useConnectedWallet, usePrivyLogin } from '../lib/hooks';
+import { CU, buildLaunch, useUpmemeTx } from '../lib/tx';
+import { ensureAttested } from '../lib/attest';
+import { formatTokens } from '../lib/format';
 
 const climbPresets = [
   { label: '15m', seconds: 900 },
@@ -9,7 +16,7 @@ const climbPresets = [
   { label: '3d', seconds: 259200 },
 ];
 
-type LaunchState = 'idle' | 'confirming' | 'launching' | 'done';
+type LaunchState = 'idle' | 'verifying' | 'confirming' | 'launching' | 'done';
 
 export function Launch() {
   const [image, setImage] = useState<string | null>(null);
@@ -21,11 +28,28 @@ export function Launch() {
   const [telegram, setTelegram] = useState('');
   const [website, setWebsite] = useState('');
   const [climb, setClimb] = useState(3600);
+  const [seed, setSeed] = useState('0.5');
   const [state, setState] = useState<LaunchState>('idle');
+  const [error, setError] = useState('');
+  const [statusNote, setStatusNote] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const ready = name.trim().length > 0 && ticker.trim().length > 0 && image !== null;
-  const busy = state === 'confirming' || state === 'launching';
+  const { connected, address: wallet } = useConnectedWallet();
+  const login = usePrivyLogin();
+  const { send } = useUpmemeTx();
+
+  const seedLamports = useMemo(() => {
+    const v = Number(seed);
+    return Number.isFinite(v) && v > 0 ? BigInt(Math.round(v * 1e9)) : 0n;
+  }, [seed]);
+  /** exact seed output — the launch tx is atomic, so no slippage can occur */
+  const seedEstimate = useMemo(
+    () => (seedLamports > 0n ? buyTokensOut(VIRTUAL_SOL, TOTAL_SUPPLY, seedLamports) : null),
+    [seedLamports],
+  );
+
+  const ready = name.trim().length > 0 && ticker.trim().length > 0 && image !== null && seedLamports > 0n;
+  const busy = state === 'verifying' || state === 'confirming' || state === 'launching';
 
   const pickImage = (file: File | undefined) => {
     setImageError('');
@@ -49,14 +73,60 @@ export function Launch() {
     pickImage(e.dataTransfer.files?.[0]);
   };
 
-  const fakeLaunch = () => {
-    setState('confirming');
-    setTimeout(() => setState('launching'), 1200);
-    setTimeout(() => setState('done'), 3000);
+  const doLaunch = async () => {
+    if (!connected || !wallet) {
+      login();
+      return;
+    }
+    if (!ready) {
+      setError('Name, ticker, image and a seed buy are required.');
+      return;
+    }
+    setError('');
+    setStatusNote('');
+    try {
+      // during a climb the creator seeds through the same gate as everyone —
+      // the pump.fun profile check runs first (server submits the attestation)
+      if (climb > 0) {
+        setState('verifying');
+        await ensureAttested(wallet, setStatusNote);
+      }
+      setState('confirming');
+      const mint = await generateKeyPairSigner();
+      const uri = /^https?:\/\//.test(website.trim()) ? website.trim() : '';
+      const ix = await buildLaunch({
+        creator: wallet,
+        mint: mint.address,
+        name: name.trim(),
+        symbol: ticker.trim(),
+        uri,
+        climbSeconds: BigInt(climb),
+        seedLamports,
+        minSeedTokensOut: seedEstimate ?? 0n,
+        creatorAttested: climb > 0,
+      });
+      setState('launching');
+      await send([ix], { signers: [mint], cuLimit: CU.launch });
+      // the image can't go on-chain (the program stores no metadata) — seed the
+      // local metadata cache so this browser shows the launch correctly at once
+      seedMetaCache(mint.address, {
+        name: name.trim(),
+        symbol: ticker.trim(),
+        uri,
+        climbSeconds: BigInt(climb),
+        seedLamports,
+        image,
+      });
+      setState('done');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'launch failed');
+      setState('idle');
+    }
   };
 
   const buttonLabel = {
-    idle: ready ? `launch $${ticker}` : 'connect wallet to launch',
+    idle: connected ? (ready ? `launch $${ticker}` : 'launch') : 'connect wallet to launch',
+    verifying: 'verifying pump.fun profile…',
     confirming: 'confirm in wallet…',
     launching: 'launching on-chain…',
     done: 'launched ✓',
@@ -204,6 +274,25 @@ export function Launch() {
             </div>
           </div>
 
+          {/* seed buy — the program requires it */}
+          <div className="animate-in-slide stagger-4">
+            <label className="mb-1.5 block text-[12px] font-semibold text-ink-mute">
+              seed buy — your wallet deploys, your wallet seeds (SOL)
+            </label>
+            <input
+              value={seed}
+              onChange={(e) => setSeed(e.target.value)}
+              inputMode="decimal"
+              placeholder="0.5"
+              className="field font-mono"
+            />
+            <p className="mt-1 text-right font-mono text-[10px] text-ink-ghost">
+              {seedEstimate !== null
+                ? `≈ ${formatTokens(seedEstimate)} $${ticker || '···'} (${((Number(seedEstimate) / Number(TOTAL_SUPPLY)) * 100).toFixed(2)}% of supply)`
+                : 'seed must be greater than 0 SOL'}
+            </p>
+          </div>
+
           {/* fixed terms */}
           <div className="animate-in-slide stagger-4 well rounded-2xl p-4 text-[12px] leading-relaxed text-ink-dim">
             <div className="mb-2 font-bold text-ink">locked-in terms — same for every launch:</div>
@@ -216,17 +305,23 @@ export function Launch() {
           </div>
 
           {/* submit */}
-          <button
-            disabled={busy || state === 'done'}
-            onClick={fakeLaunch}
-            className={`animate-in-slide stagger-5 w-full py-3.5 text-[14px] ${
-              state === 'done'
-                ? 'cursor-default rounded-full border border-pump/40 bg-pump/10 font-bold text-pump'
-                : `btn-pump ${busy ? 'btn-loading' : ''}`
-            }`}
-          >
-            {buttonLabel}
-          </button>
+          <div className="animate-in-slide stagger-5">
+            <button
+              disabled={busy || state === 'done'}
+              onClick={doLaunch}
+              className={`w-full py-3.5 text-[14px] ${
+                state === 'done'
+                  ? 'cursor-default rounded-full border border-pump/40 bg-pump/10 font-bold text-pump'
+                  : `btn-pump ${busy ? 'btn-loading' : ''}`
+              }`}
+            >
+              {buttonLabel}
+            </button>
+            {statusNote && busy && (
+              <p className="animate-row-in mt-1.5 text-[12px] font-medium text-ink-mute">{statusNote}</p>
+            )}
+            {error && <p className="animate-row-in mt-1.5 text-[12px] font-medium text-ember">{error}</p>}
+          </div>
         </div>
 
         {/* sticky live preview */}

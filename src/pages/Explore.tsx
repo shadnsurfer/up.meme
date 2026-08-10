@@ -1,7 +1,19 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { mockLaunches, formatUsd, type Launch } from '../data/mock';
-import { Countdown } from '../components/Countdown';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import {
+  climbEndSeconds,
+  createdAtSeconds,
+  displayName,
+  displayTicker,
+  isClimbing,
+  mcapUsd,
+  solRaised,
+  soldFraction,
+  type LiveLaunch,
+} from '../lib/chain';
+import { useLaunches } from '../lib/hooks';
+import { formatSol, formatUsd, shortenAddress } from '../lib/format';
+import { Countdown, useNowSeconds } from '../components/Countdown';
 import { TabsPill } from '../components/TabsPill';
 import { Pagination } from '../components/Pagination';
 import { RollingNumber } from '../components/RollingNumber';
@@ -18,28 +30,42 @@ const sortOptions = [
 
 const PAGE_SIZE = 6;
 
-/** fraction of the climb window elapsed, 0..1 (mock: derive from endsAt) */
-function climbProgress(l: Launch): number {
-  if (l.climbEndsAt === null) return 1;
-  const now = Math.floor(Date.now() / 1000);
-  const total = l.climbEndsAt - l.createdAt;
-  if (total <= 0) return 1;
-  return Math.min(1, Math.max(0.04, (now - l.createdAt) / total));
+/** fraction of the climb window elapsed, 0..1 (falls back to curve sold %) */
+function climbProgress(l: LiveLaunch, now: number): number {
+  if (!isClimbing(l, now)) return 1;
+  const created = createdAtSeconds(l);
+  if (created !== null) {
+    const total = climbEndSeconds(l) - created;
+    if (total > 0) return Math.min(1, Math.max(0.04, (now - created) / total));
+  }
+  const sold = soldFraction(l);
+  return Math.min(1, Math.max(0.04, sold ?? 0.04));
 }
 
-function LaunchCard({ launch, index }: { launch: Launch; index: number }) {
-  const climbing = launch.climbEndsAt !== null;
-  const progress = climbProgress(launch);
+function LaunchCard({ launch, index, now }: { launch: LiveLaunch; index: number; now: number }) {
+  const navigate = useNavigate();
+  const climbing = isClimbing(launch, now);
+  const progress = climbProgress(launch, now);
+  const mcap = mcapUsd(launch);
 
   return (
     <li className="animate-in-slide" style={{ animationDelay: `${Math.min(index, 10) * 35}ms` }}>
-      <button className="group grid w-full grid-rows-[auto_1fr] gap-2.5 rounded-[20px] border border-transparent bg-white/[0.03] p-2.5 text-left transition duration-200 hover:-translate-y-1 hover:border-white/[0.12] hover:bg-white/[0.07] hover:shadow-[0_16px_40px_rgba(0,0,0,0.5)]">
+      <button
+        onClick={() => navigate(`/coin/${launch.state.mint}`)}
+        className="group grid w-full grid-rows-[auto_1fr] gap-2.5 rounded-[20px] border border-transparent bg-white/[0.03] p-2.5 text-left transition duration-200 hover:-translate-y-1 hover:border-white/[0.12] hover:bg-white/[0.07] hover:shadow-[0_16px_40px_rgba(0,0,0,0.5)]"
+      >
         {/* media */}
         <div className="relative">
           <div className="grid aspect-square w-full place-items-center overflow-hidden rounded-[14px] bg-void text-5xl">
-            <span className="transition-transform duration-300 ease-out group-hover:scale-110">
-              {launch.emoji}
-            </span>
+            {launch.meta?.image ? (
+              <img
+                src={launch.meta.image}
+                alt=""
+                className="h-full w-full object-cover transition-transform duration-300 ease-out group-hover:scale-110"
+              />
+            ) : (
+              <span className="transition-transform duration-300 ease-out group-hover:scale-110">👁️</span>
+            )}
           </div>
           <div className="absolute left-2 top-2 z-10 flex items-center gap-1">
             {climbing ? (
@@ -51,24 +77,19 @@ function LaunchCard({ launch, index }: { launch: Launch; index: number }) {
                 open
               </span>
             )}
-            {launch.official && (
-              <span className="rounded-full bg-pump/85 px-2 py-1 text-[10px] font-semibold tracking-tight text-[#0a1f13] backdrop-blur-md">
-                official
-              </span>
-            )}
           </div>
         </div>
 
         {/* body */}
         <div className="grid min-w-0 gap-1 px-0.5 pb-0.5">
           <strong className="truncate text-[14px] font-semibold tracking-tight text-ink transition-colors group-hover:text-pump-soft">
-            {launch.name}
+            {displayName(launch)}
           </strong>
-          <small className="truncate font-mono text-[12px] text-ink-mute">${launch.ticker}</small>
+          <small className="truncate font-mono text-[12px] text-ink-mute">${displayTicker(launch)}</small>
 
           <div className="mt-1 flex items-baseline gap-1.5">
             <span className="font-mono text-[14px] font-bold tabular-nums text-ink">
-              {formatUsd(launch.marketCap)}
+              {mcap !== null ? formatUsd(mcap) : '···'}
             </span>
             <span className="text-[11px] text-ink-ghost">mcap</span>
           </div>
@@ -84,13 +105,15 @@ function LaunchCard({ launch, index }: { launch: Launch; index: number }) {
               />
             </span>
             <span className="flex-none font-mono text-[11px] tabular-nums text-ink-ghost">
-              {climbing ? <Countdown endsAt={launch.climbEndsAt!} /> : 'live'}
+              {climbing ? <Countdown endsAt={climbEndSeconds(launch)} /> : 'live'}
             </span>
           </div>
 
           <div className="mt-1 flex items-center justify-between text-[11px] text-ink-ghost">
-            <span className="truncate font-mono">{launch.creator}</span>
-            <span className="flex-none tabular-nums">{launch.holders} holders</span>
+            <span className="truncate font-mono">{shortenAddress(launch.state.creator)}</span>
+            <span className="flex-none tabular-nums">
+              {launch.state.migrated ? 'migrated' : `◎${formatSol(solRaised(launch))} raised`}
+            </span>
           </div>
         </div>
       </button>
@@ -144,14 +167,17 @@ export function Explore() {
   const [sort, setSort] = useState<SortKey>('recent');
   const [pageActive, setPageActive] = useState(1);
   const [pageOpen, setPageOpen] = useState(1);
+  const now = useNowSeconds();
+  const { launches, status } = useLaunches();
 
   // brief skeleton pass on mount and whenever sort/filter changes
-  const [loading, setLoading] = useState(true);
+  const [skeletonPass, setSkeletonPass] = useState(true);
   useEffect(() => {
-    setLoading(true);
-    const t = window.setTimeout(() => setLoading(false), 650);
+    setSkeletonPass(true);
+    const t = window.setTimeout(() => setSkeletonPass(false), 650);
     return () => window.clearTimeout(t);
   }, [sort, query]);
+  const loading = skeletonPass || status === 'loading';
 
   // reset paging whenever the filter or sort changes
   useEffect(() => {
@@ -161,31 +187,39 @@ export function Explore() {
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
-    let list = [...mockLaunches];
+    let list = [...launches];
     if (q) {
       list = list.filter(
         (l) =>
-          l.name.toLowerCase().includes(q) ||
-          l.ticker.toLowerCase().includes(q) ||
-          l.id.includes(q),
+          (l.meta?.name ?? '').toLowerCase().includes(q) ||
+          (l.meta?.symbol ?? '').toLowerCase().includes(q) ||
+          l.state.mint.toLowerCase().includes(q),
       );
     }
     list.sort((a, b) => {
       if (sort === 'recent') {
-        const ab = a.climbEndsAt !== null ? 0 : 1;
-        const bb = b.climbEndsAt !== null ? 0 : 1;
+        const ab = isClimbing(a, now) ? 0 : 1;
+        const bb = isClimbing(b, now) ? 0 : 1;
         if (ab !== bb) return ab - bb;
-        return b.volume24h - a.volume24h;
+        return (mcapUsd(b) ?? 0) - (mcapUsd(a) ?? 0);
       }
-      if (sort === 'newest') return b.createdAt - a.createdAt;
-      if (sort === 'mcap') return b.marketCap - a.marketCap;
-      return b.volume24h - a.volume24h;
+      if (sort === 'newest') {
+        return (
+          (createdAtSeconds(b) ?? climbEndSeconds(b)) - (createdAtSeconds(a) ?? climbEndSeconds(a))
+        );
+      }
+      if (sort === 'mcap') return (mcapUsd(b) ?? 0) - (mcapUsd(a) ?? 0);
+      // no trade-volume index exists on-chain — SOL seated in the curve is the
+      // closest real signal
+      const av = solRaised(a);
+      const bv = solRaised(b);
+      return bv > av ? 1 : bv < av ? -1 : 0;
     });
     return list;
-  }, [query, sort]);
+  }, [launches, query, sort, now]);
 
-  const active = results.filter((l) => l.climbEndsAt !== null);
-  const graduated = results.filter((l) => l.climbEndsAt === null);
+  const active = results.filter((l) => isClimbing(l, now));
+  const graduated = results.filter((l) => !isClimbing(l, now));
 
   return (
     <div className="animate-in-slide flex flex-col gap-4">
@@ -252,11 +286,20 @@ export function Explore() {
           <SkeletonGrid />
         ) : active.length === 0 ? (
           <div className="grid justify-items-start gap-4 px-1 py-6">
-            <p className="text-[13px] font-semibold text-ink-dim">No climbs live right now.</p>
-            <p className="text-[12px] text-ink-ghost">Be the first. The only way is up.</p>
-            <a href="/launch" className="btn-pump min-w-[160px] px-5 py-2.5 text-center text-[13px]">
-              launch a coin
-            </a>
+            {status === 'error' ? (
+              <>
+                <p className="text-[13px] font-semibold text-ink-dim">couldn't reach the chain.</p>
+                <p className="text-[12px] text-ink-ghost">check your connection — retrying in the background.</p>
+              </>
+            ) : (
+              <>
+                <p className="text-[13px] font-semibold text-ink-dim">No climbs live right now.</p>
+                <p className="text-[12px] text-ink-ghost">Be the first. The only way is up.</p>
+                <a href="/launch" className="btn-pump min-w-[160px] px-5 py-2.5 text-center text-[13px]">
+                  launch a coin
+                </a>
+              </>
+            )}
           </div>
         ) : (
           <>
@@ -265,7 +308,7 @@ export function Explore() {
               className="grid grid-cols-[repeat(auto-fill,minmax(168px,1fr))] gap-3"
             >
               {paged(active, pageActive).map((l, i) => (
-                <LaunchCard key={l.id} launch={l} index={i} />
+                <LaunchCard key={l.state.mint} launch={l} index={i} now={now} />
               ))}
             </ul>
             <Pagination
@@ -299,7 +342,7 @@ export function Explore() {
             className="grid grid-cols-[repeat(auto-fill,minmax(168px,1fr))] gap-3"
           >
             {paged(graduated, pageOpen).map((l, i) => (
-              <LaunchCard key={l.id} launch={l} index={i} />
+              <LaunchCard key={l.state.mint} launch={l} index={i} now={now} />
             ))}
           </ul>
           <Pagination

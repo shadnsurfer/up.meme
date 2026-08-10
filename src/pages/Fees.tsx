@@ -1,31 +1,58 @@
-import { useEffect, useState } from 'react';
-import { formatUsd } from '../data/mock';
+import { useMemo, useState } from 'react';
+import {
+  SOL_PRICE_USD,
+  displayName,
+  displayTicker,
+  feesClaimable,
+  fetchConfig,
+  type LiveLaunch,
+} from '../lib/chain';
+import { useConnectedWallet, useLaunches, usePrivyLogin } from '../lib/hooks';
+import { CU, buildClaimFees, useUpmemeTx } from '../lib/tx';
+import { formatSol, formatUsd } from '../lib/format';
 import { RollingNumber } from '../components/RollingNumber';
 
-type FeeEntry = {
-  token: string;
-  ticker: string;
-  emoji: string;
-  claimable: number;
-  lifetime: number;
-};
-
-const mockFees: FeeEntry[] = [
-  { token: 'Fair Cat', ticker: 'FAIRC', emoji: '🐱', claimable: 412.5, lifetime: 1093.2 },
-  { token: 'Signal', ticker: 'SGNL', emoji: '⚡', claimable: 96.1, lifetime: 2210.0 },
-];
+/** the creator's half of a launch's claimable fees, in USD (cosmetic rate) */
+function creatorClaimableUsd(l: LiveLaunch): number {
+  return (Number(feesClaimable(l)) / 2 / 1e9) * SOL_PRICE_USD;
+}
 
 export function Fees() {
-  const [connected] = useState(true);
+  const { connected, address: wallet } = useConnectedWallet();
+  const login = usePrivyLogin();
+  const { send } = useUpmemeTx();
+  const { launches, refresh } = useLaunches();
+  const [busyMint, setBusyMint] = useState<string | 'all' | null>(null);
+  const [error, setError] = useState('');
 
-  // mock live accrual — fees trickle in so the odometer digits roll
-  const [total, setTotal] = useState(() => mockFees.reduce((a, f) => a + f.claimable, 0));
-  useEffect(() => {
-    const t = window.setInterval(() => {
-      setTotal((v) => v + Math.random() * 1.4);
-    }, 3200);
-    return () => window.clearInterval(t);
-  }, []);
+  // every launch this wallet created with fees sitting in its vault
+  const mine = useMemo(
+    () => launches.filter((l) => wallet !== null && l.state.creator === wallet && feesClaimable(l) > 0n),
+    [launches, wallet],
+  );
+  const total = mine.reduce((a, l) => a + creatorClaimableUsd(l), 0);
+
+  const claim = async (targets: LiveLaunch[]) => {
+    if (!wallet || targets.length === 0) return;
+    setError('');
+    setBusyMint(targets.length > 1 ? 'all' : targets[0].state.mint);
+    try {
+      const config = await fetchConfig();
+      if (!config) throw new Error('protocol config not found on-chain');
+      const ixs = await Promise.all(
+        targets.map((l) =>
+          buildClaimFees({ mint: l.state.mint, creator: l.state.creator, protocolVault: config.protocolVault }),
+        ),
+      );
+      await send(ixs, { cuLimit: Math.min(CU.claimFees * ixs.length, CU.migrate) });
+      refresh();
+      window.setTimeout(refresh, 4_000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'claim failed');
+    } finally {
+      setBusyMint(null);
+    }
+  };
 
   return (
     <div className="animate-in-slide w-full max-w-3xl pt-6">
@@ -39,7 +66,9 @@ export function Fees() {
         {!connected ? (
           <div className="flex flex-col items-center gap-3 py-10">
             <p className="text-[13px] font-semibold text-ink-dim">connect your wallet to view fees</p>
-            <button className="btn-pump px-6 py-2.5 text-[13px]">connect wallet</button>
+            <button onClick={login} className="btn-pump px-6 py-2.5 text-[13px]">
+              connect wallet
+            </button>
           </div>
         ) : (
           <>
@@ -52,40 +81,55 @@ export function Fees() {
                   <RollingNumber value={formatUsd(total)} />
                 </div>
               </div>
-              <button disabled={total === 0} className="btn-pump px-7 py-2.5 text-[13px]">
+              <button
+                disabled={total === 0 || busyMint !== null}
+                onClick={() => void claim(mine)}
+                className={`btn-pump px-7 py-2.5 text-[13px] ${busyMint === 'all' ? 'btn-loading' : ''}`}
+              >
                 claim all
               </button>
             </div>
+            {error && <p className="animate-row-in mt-2 text-[12px] font-medium text-ember">{error}</p>}
 
             <div className="mt-4 flex flex-col gap-1 border-t border-white/[0.06] pt-3">
-              {mockFees.length === 0 ? (
+              {mine.length === 0 ? (
                 <div className="py-8 text-center">
                   <p className="text-[13px] font-semibold text-ink-dim">No fees yet</p>
                   <p className="mt-1 text-[12px] text-ink-ghost">Nothing to claim yet</p>
                 </div>
               ) : (
-                mockFees.map((f, i) => (
+                mine.map((l, i) => (
                   <div
-                    key={f.ticker}
+                    key={l.state.mint}
                     className="animate-row-in flex flex-wrap items-center gap-3 rounded-2xl px-3 py-2.5 transition hover:bg-white/[0.05] sm:flex-nowrap sm:gap-4"
                     style={{ animationDelay: `${i * 60}ms` }}
                   >
-                    <div className="flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.08] bg-raised text-lg">
-                      {f.emoji}
+                    <div className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full border border-white/[0.08] bg-raised text-lg">
+                      {l.meta?.image ? (
+                        <img src={l.meta.image} alt="" className="h-full w-full object-cover" />
+                      ) : (
+                        '👁️'
+                      )}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-[13px] font-bold text-ink">{f.token}</div>
-                      <div className="font-mono text-[11px] text-ink-mute">${f.ticker}</div>
+                      <div className="truncate text-[13px] font-bold text-ink">{displayName(l)}</div>
+                      <div className="font-mono text-[11px] text-ink-mute">${displayTicker(l)}</div>
                     </div>
                     <div className="text-right">
                       <div className="font-mono text-[13px] font-bold tabular-nums text-pump">
-                        {formatUsd(f.claimable)}
+                        {formatUsd(creatorClaimableUsd(l))}
                       </div>
                       <div className="text-[10px] text-ink-ghost">
-                        {formatUsd(f.lifetime)} lifetime
+                        ◎{formatSol(feesClaimable(l) / 2n)} claimable
                       </div>
                     </div>
-                    <button className="btn-ghost px-4 py-1.5 text-[12px]">claim</button>
+                    <button
+                      disabled={busyMint !== null}
+                      onClick={() => void claim([l])}
+                      className={`btn-ghost px-4 py-1.5 text-[12px] ${busyMint === l.state.mint ? 'btn-loading' : ''}`}
+                    >
+                      claim
+                    </button>
                   </div>
                 ))
               )}
