@@ -34,7 +34,7 @@ export function Shell() {
             <NavLink to="/" className="flex min-w-0 items-center gap-2.5">
               <img
                 key={location.pathname}
-                src="/logo-green.png"
+                src="/logo-white.png"
                 alt="up.meme"
                 className="animate-logo-hop h-8 w-8 object-contain"
               />

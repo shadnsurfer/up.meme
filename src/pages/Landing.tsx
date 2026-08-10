@@ -50,7 +50,7 @@ export function Landing() {
       <main className="relative z-10 flex flex-1 flex-col items-center justify-center px-6 py-10 text-center">
         <div className="animate-in-slide stagger-1">
           <img
-            src="/logo-green.png"
+            src="/logo-white.png"
             alt="up.meme"
             className="animate-hero-drift mx-auto h-20 w-20 object-contain sm:h-24 sm:w-24"
           />

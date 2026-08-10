@@ -26,7 +26,7 @@ createRoot(document.getElementById('root')!).render(
           appearance: {
             theme: 'dark',
             accentColor: '#5fcb88',
-            logo: '/logo-green.png',
+            logo: '/logo-white.png',
             landingHeader: 'enter up.meme',
             showWalletLoginFirst: true,
             walletChainType: 'solana-only',
