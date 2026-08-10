@@ -1,0 +1,22 @@
+{
+  "name": "up-meme-anchor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "up.meme — anchor program tests",
+  "scripts": {
+    "test": "tsc -p tsconfig.test.json && mocha -t 1000000 \"dist-test/**/*.js\""
+  },
+  "devDependencies": {
+    "@coral-xyz/anchor": "^0.31.1",
+    "@solana/spl-token": "^0.4.13",
+    "@solana/web3.js": "^1.98.4",
+    "@types/chai": "^4.3.20",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.15.0",
+    "chai": "^4.5.0",
+    "mocha": "^10.8.2",
+    "ts-mocha": "^10.0.0",
+    "typescript": "^5.9.2"
+  }
+}

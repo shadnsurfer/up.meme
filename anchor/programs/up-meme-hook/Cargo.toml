@@ -1,0 +1,22 @@
+[package]
+name = "up-meme-hook"
+version = "0.1.0"
+description = "up.meme — transfer-hook program (split from the main program: the runtime forbids indirect re-entrancy, so the program that initiates curve transfers cannot also be the hook)"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "up_meme_hook"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+idl-build = ["anchor-lang/idl-build"]
+
+[dependencies]
+anchor-lang = { version = "0.31.1", features = ["interface-instructions"] }
+spl-transfer-hook-interface = "0.9.0"
+spl-tlv-account-resolution = "0.9.0"

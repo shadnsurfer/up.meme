@@ -1,18 +1,28 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::program_pack::Pack;
-use anchor_lang::solana_program::{program::{invoke, invoke_signed}, system_instruction};
+use anchor_lang::solana_program::{program::{invoke, invoke_signed}, instruction::{AccountMeta, Instruction}, system_instruction};
 use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token_2022::{self, spl_token_2022, Token2022, TransferChecked};
+use anchor_spl::token_2022::{spl_token_2022, Token2022};
 use anchor_spl::token_interface::{Mint, TokenAccount};
-use spl_tlv_account_resolution::{account::ExtraAccountMeta, seeds::Seed, state::ExtraAccountMetaList};
-use spl_transfer_hook_interface::instruction::ExecuteInstruction;
 use spl_token_2022::extension::ExtensionType;
 
 pub mod state;
 use state::*;
 
-// PLACEHOLDER — replace with the real program keypair pubkey after first build
-declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
+// program keypair: anchor/target/deploy/up_meme-keypair.json (gitignored — back it up)
+declare_id!("57RhPQ8nBFrnknZTE4kmm56SSyUA1BysCKA39waoeqaM");
+
+/// the transfer-hook program every up.meme mint points at. it MUST be a
+/// separate program: this program initiates curve transfers via token-2022,
+/// which then invokes the hook — if the hook were this program, that is
+/// indirect re-entrancy (A -> token-2022 -> A) and the runtime refuses it.
+/// keypair: anchor/target/deploy/up_meme_hook-keypair.json
+pub const UP_MEME_HOOK_ID: Pubkey = pubkey!("ws45kVaY6HcPrdrT6UP6WorwpviBPjnJbG7yjSkqeHN");
+
+/// instruction discriminator for the hook program's
+/// initialize_extra_account_meta_list — the spl-transfer-hook-interface
+/// convention (sha256("spl-transfer-hook-interface:initialize-extra-account-metas")[..8]),
+/// matching anchor's `#[interface]` override on the hook side.
+pub const HOOK_INIT_METAS_DISCRIMINATOR: [u8; 8] = [43, 34, 13, 49, 167, 88, 235, 235];
 
 #[program]
 pub mod up_meme {
@@ -95,7 +105,7 @@ pub mod up_meme {
                 // program ever signs is setting the hook id to None at
                 // migration, permanently disabling it after the climb.
                 Some(ctx.accounts.vault_authority.key()),
-                Some(crate::ID),
+                Some(UP_MEME_HOOK_ID),
             )?,
             &[mint.to_account_info()],
         )?;
@@ -113,12 +123,18 @@ pub mod up_meme {
         // ---- curve token account (PDA, owned by vault authority) ----
         let curve_bump = ctx.bumps.curve_token_account;
         let curve_seeds: &[&[u8]] = &[b"curve", mint_key.as_ref(), &[curve_bump]];
+        // token accounts of a transfer-hook mint must carry the
+        // TransferHookAccount extension — the base 165-byte Account::LEN is
+        // too small and initialize_account3 rejects it with InvalidAccountData
+        let curve_account_space = ExtensionType::try_calculate_account_len::<
+            spl_token_2022::state::Account,
+        >(&[ExtensionType::TransferHookAccount])?;
         invoke_signed(
             &system_instruction::create_account(
                 &creator.key(),
                 &ctx.accounts.curve_token_account.key(),
-                rent.minimum_balance(spl_token_2022::state::Account::LEN),
-                spl_token_2022::state::Account::LEN as u64,
+                rent.minimum_balance(curve_account_space),
+                curve_account_space as u64,
                 &spl_token_2022::ID,
             ),
             &[
@@ -141,38 +157,41 @@ pub mod up_meme {
             ],
         )?;
 
+        // ---- creator ATA (in-handler: the mint only exists from here on) ----
+        anchor_spl::associated_token::create(CpiContext::new(
+            ctx.accounts.associated_token_program.to_account_info(),
+            anchor_spl::associated_token::Create {
+                payer: creator.to_account_info(),
+                associated_token: ctx.accounts.creator_ata.to_account_info(),
+                authority: creator.to_account_info(),
+                mint: mint.to_account_info(),
+                system_program: ctx.accounts.system_program.to_account_info(),
+                token_program: ctx.accounts.token_program.to_account_info(),
+            },
+        ))?;
+
         // ---- transfer-hook extra account metas (resolves the launch PDA) ----
-        let metas = [ExtraAccountMeta::new_with_seeds(
-            &[
-                Seed::Literal { bytes: b"launch".to_vec() },
-                // account index 1 in the hook's fixed account list is the mint
-                Seed::AccountKey { index: 1 },
-            ],
-            false,
-            false,
-        )?];
-        let metas_size = ExtraAccountMetaList::size_of(metas.len())?;
-        let extra_bump = ctx.bumps.extra_metas;
-        let extra_seeds: &[&[u8]] = &[b"extra-account-metas", mint_key.as_ref(), &[extra_bump]];
-        invoke_signed(
-            &system_instruction::create_account(
-                &creator.key(),
-                &ctx.accounts.extra_metas.key(),
-                rent.minimum_balance(metas_size),
-                metas_size as u64,
-                &crate::ID,
-            ),
+        // created by the HOOK program via CPI: the metas account is a PDA of
+        // the hook program, so only it can sign for the address.
+        invoke(
+            &Instruction {
+                program_id: UP_MEME_HOOK_ID,
+                accounts: vec![
+                    AccountMeta::new(creator.key(), true),
+                    AccountMeta::new(ctx.accounts.extra_metas.key(), false),
+                    AccountMeta::new_readonly(mint_key, false),
+                    AccountMeta::new_readonly(anchor_lang::solana_program::system_program::ID, false),
+                ],
+                data: HOOK_INIT_METAS_DISCRIMINATOR.to_vec(),
+            },
             &[
                 creator.to_account_info(),
                 ctx.accounts.extra_metas.to_account_info(),
+                mint.to_account_info(),
                 ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.hook_program.to_account_info(),
             ],
-            &[extra_seeds],
         )?;
-        {
-            let mut data = ctx.accounts.extra_metas.try_borrow_mut_data()?;
-            ExtraAccountMetaList::init::<ExecuteInstruction>(&mut data, &metas)?;
-        }
 
         // ---- SOL vaults (0-data PDAs, funded to the rent floor) ----
         for (vault, bump, seed) in [
@@ -207,6 +226,14 @@ pub mod up_meme {
         launch.sol_vault_bump = ctx.bumps.sol_vault;
         launch.fee_vault_bump = ctx.bumps.fee_vault;
 
+        // anchor only serializes `init` accounts AFTER the handler returns
+        // (AccountsExit::exit) — until then the launch PDA's on-chain data is
+        // all zeros. the seed buy below fires the transfer hook, which CPIs
+        // back into this program and deserializes `launch`; without flushing
+        // it here that read fails with AccountDiscriminatorMismatch and every
+        // launch would roll back.
+        ctx.accounts.launch.exit(&crate::ID)?;
+
         // ---- mint the full supply to the curve ----
         let vault_bump = ctx.bumps.vault_authority;
         let vault_seeds: &[&[u8]] = &[b"vault", mint_key.as_ref(), &[vault_bump]];
@@ -235,18 +262,17 @@ pub mod up_meme {
             &system_instruction::transfer(&creator.key(), &ctx.accounts.sol_vault.key(), seed_lamports),
             &[creator.to_account_info(), ctx.accounts.sol_vault.to_account_info(), ctx.accounts.system_program.to_account_info()],
         )?;
-        transfer_from_curve(
-            &ctx.accounts.token_program,
+        transfer_with_hook(
+            ctx.accounts.token_program.to_account_info(),
             ctx.accounts.curve_token_account.to_account_info(),
             mint.to_account_info(),
             ctx.accounts.creator_ata.to_account_info(),
             ctx.accounts.vault_authority.to_account_info(),
-            hook_accounts(
-                ctx.accounts.launch.to_account_info(),
-                ctx.accounts.extra_metas.to_account_info(),
-                ctx.accounts.hook_program.to_account_info(),
-            ),
-            vault_seeds,
+            ctx.accounts.up_meme_program.to_account_info(),
+            ctx.accounts.launch.to_account_info(),
+            ctx.accounts.extra_metas.to_account_info(),
+            ctx.accounts.hook_program.to_account_info(),
+            &[vault_seeds],
             tokens_out,
         )?;
 
@@ -284,18 +310,17 @@ pub mod up_meme {
         }
 
         let vault_seeds: &[&[u8]] = &[b"vault", launch.mint.as_ref(), &[launch.vault_bump]];
-        transfer_from_curve(
-            &ctx.accounts.token_program,
+        transfer_with_hook(
+            ctx.accounts.token_program.to_account_info(),
             ctx.accounts.curve_token_account.to_account_info(),
             ctx.accounts.mint.to_account_info(),
             ctx.accounts.trader_ata.to_account_info(),
             ctx.accounts.vault_authority.to_account_info(),
-            hook_accounts(
-                ctx.accounts.launch.to_account_info(),
-                ctx.accounts.extra_metas.to_account_info(),
-                ctx.accounts.hook_program.to_account_info(),
-            ),
-            vault_seeds,
+            ctx.accounts.up_meme_program.to_account_info(),
+            ctx.accounts.launch.to_account_info(),
+            ctx.accounts.extra_metas.to_account_info(),
+            ctx.accounts.hook_program.to_account_info(),
+            &[vault_seeds],
             tokens_out,
         )
     }
@@ -319,23 +344,18 @@ pub mod up_meme {
         );
 
         // tokens in — trader signs; the hook allows curve-bound transfers
-        token_2022::transfer_checked(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                TransferChecked {
-                    from: ctx.accounts.trader_ata.to_account_info(),
-                    to: ctx.accounts.curve_token_account.to_account_info(),
-                    authority: ctx.accounts.trader.to_account_info(),
-                    mint: ctx.accounts.mint.to_account_info(),
-                },
-            )
-            .with_remaining_accounts(hook_accounts(
-                ctx.accounts.launch.to_account_info(),
-                ctx.accounts.extra_metas.to_account_info(),
-                ctx.accounts.hook_program.to_account_info(),
-            )),
+        transfer_with_hook(
+            ctx.accounts.token_program.to_account_info(),
+            ctx.accounts.trader_ata.to_account_info(),
+            ctx.accounts.mint.to_account_info(),
+            ctx.accounts.curve_token_account.to_account_info(),
+            ctx.accounts.trader.to_account_info(),
+            ctx.accounts.up_meme_program.to_account_info(),
+            ctx.accounts.launch.to_account_info(),
+            ctx.accounts.extra_metas.to_account_info(),
+            ctx.accounts.hook_program.to_account_info(),
+            &[],
             token_amount,
-            6,
         )?;
 
         // SOL out — vault PDA signs via the system program
@@ -393,27 +413,11 @@ pub mod up_meme {
         )?;
         Ok(())
     }
-
-    /// SPL transfer-hook interface entrypoint. the `#[interface]` attribute
-    /// overrides the instruction discriminator with the one token-2022 calls
-    /// (sha256("spl-transfer-hook-interface:execute")[..8], NOT the anchor
-    /// default). during the climb, tokens may only move to or from the
-    /// curve — buys and sells through the program. after it ends, everything
-    /// moves freely.
-    #[interface(spl_transfer_hook_interface::execute)]
-    pub fn execute(ctx: Context<ExecuteHook>, _amount: u64) -> Result<()> {
-        let launch = &ctx.accounts.launch;
-        let now = Clock::get()?.unix_timestamp;
-        if now < launch.climb_end {
-            require!(
-                ctx.accounts.source.key() == launch.curve_token_account
-                    || ctx.accounts.destination.key() == launch.curve_token_account,
-                UpError::ClimbTransfersLocked
-            );
-        }
-        Ok(())
-    }
 }
+
+// NOTE: the transfer-hook `execute` entrypoint lives in the `up_meme_hook`
+// program, not here — see the comment at UP_MEME_HOOK_ID for why the hook
+// cannot be this program (indirect re-entrancy is refused by the runtime).
 
 // ---------- curve math (constant product over virtual + real reserves) ----------
 
@@ -438,44 +442,49 @@ fn reserve_sol(launch: &Launch, vault_lamports: u64) -> u64 {
     launch.virtual_sol + vault_lamports.saturating_sub(RENT_FLOOR)
 }
 
-fn transfer_from_curve<'info>(
-    token_program: &Program<'info, Token2022>,
-    curve: AccountInfo<'info>,
+/// token-2022 transfer that fires the transfer hook. anchor-spl's
+/// transfer_checked silently DROPS CpiContext remaining_accounts, so this
+/// builds the instruction by hand: the hook's accounts — the resolved extra
+/// (launch PDA), the extra-account-metas validation state, then the hook
+/// program itself — are appended exactly like spl-transfer-hook-interface's
+/// onchain helper does. without them the token program cannot invoke the
+/// hook and the transfer fails with "Unknown program".
+#[allow(clippy::too_many_arguments)]
+fn transfer_with_hook<'info>(
+    token_program: AccountInfo<'info>,
+    from: AccountInfo<'info>,
     mint: AccountInfo<'info>,
     to: AccountInfo<'info>,
-    vault_authority: AccountInfo<'info>,
-    hook_accounts: Vec<AccountInfo<'info>>,
-    vault_seeds: &[&[u8]],
-    amount: u64,
-) -> Result<()> {
-    token_2022::transfer_checked(
-        CpiContext::new_with_signer(
-            token_program.to_account_info(),
-            TransferChecked {
-                from: curve,
-                to,
-                authority: vault_authority,
-                mint,
-            },
-            &[vault_seeds],
-        )
-        .with_remaining_accounts(hook_accounts),
-        amount,
-        6,
-    )
-}
-
-/// the accounts every token-2022 transfer of an up.meme mint must append so
-/// the token program can re-enter this program's transfer hook: resolved
-/// extra accounts first (the launch PDA), then the extra-account-metas
-/// validation state, then the hook program itself. mirrors the append order
-/// of spl-transfer-hook-interface's onchain helper.
-fn hook_accounts<'info>(
+    authority: AccountInfo<'info>,
+    up_meme_program: AccountInfo<'info>,
     launch: AccountInfo<'info>,
     extra_metas: AccountInfo<'info>,
     hook_program: AccountInfo<'info>,
-) -> Vec<AccountInfo<'info>> {
-    vec![launch, extra_metas, hook_program]
+    signer_seeds: &[&[&[u8]]],
+    amount: u64,
+) -> Result<()> {
+    let mut ix = spl_token_2022::instruction::transfer_checked(
+        &spl_token_2022::ID,
+        from.key,
+        mint.key,
+        to.key,
+        authority.key,
+        &[],
+        amount,
+        6,
+    )?;
+    // resolved extras in metas order (main program id, then launch PDA),
+    // then the validation state, then the hook program
+    ix.accounts.push(AccountMeta::new_readonly(*up_meme_program.key, false));
+    ix.accounts.push(AccountMeta::new_readonly(*launch.key, false));
+    ix.accounts.push(AccountMeta::new_readonly(*extra_metas.key, false));
+    ix.accounts.push(AccountMeta::new_readonly(*hook_program.key, false));
+    invoke_signed(
+        &ix,
+        &[token_program, from, mint, to, authority, up_meme_program, launch, extra_metas, hook_program],
+        signer_seeds,
+    )
+    .map_err(Into::into)
 }
 
 // ---------- account contexts ----------
@@ -529,21 +538,24 @@ pub struct LaunchCtx<'info> {
     /// CHECK: 0-data fee vault, created in-handler
     #[account(mut, seeds = [b"feevault", mint.key().as_ref()], bump)]
     pub fee_vault: UncheckedAccount<'info>,
-    /// CHECK: transfer-hook extra account metas, created in-handler
-    #[account(mut, seeds = [b"extra-account-metas", mint.key().as_ref()], bump)]
+    /// CHECK: transfer-hook extra account metas — a PDA of the HOOK program,
+    /// created by it via CPI in-handler
+    #[account(mut, seeds = [b"extra-account-metas", mint.key().as_ref()], bump, seeds::program = UP_MEME_HOOK_ID)]
     pub extra_metas: UncheckedAccount<'info>,
-    /// CHECK: this program's executable account — appended to token CPIs so
-    /// token-2022 can re-enter the transfer hook
-    #[account(address = crate::ID)]
+    /// CHECK: the hook program's executable account — appended to token CPIs
+    /// so token-2022 can invoke the hook
+    #[account(address = UP_MEME_HOOK_ID)]
     pub hook_program: UncheckedAccount<'info>,
-    #[account(
-        init_if_needed,
-        payer = creator,
-        associated_token::mint = mint,
-        associated_token::authority = creator,
-        associated_token::token_program = token_program,
-    )]
-    pub creator_ata: InterfaceAccount<'info, TokenAccount>,
+    /// CHECK: THIS program's executable account — the hook's metas resolve it
+    /// as an extra account (the launch PDA derives under this program id)
+    #[account(address = crate::ID)]
+    pub up_meme_program: UncheckedAccount<'info>,
+    /// CHECK: creator's ATA for the new mint — created in-handler. anchor
+    /// cannot manage this with init_if_needed: that CPI runs at try_accounts
+    /// time, before the handler initializes the mint, and fails with
+    /// Invalid Mint.
+    #[account(mut)]
+    pub creator_ata: UncheckedAccount<'info>,
     /// required when climb_seconds > 0 — checked in-handler
     #[account(seeds = [b"attest", creator.key().as_ref()], bump)]
     pub creator_attestation: Option<Account<'info, Attestation>>,
@@ -579,13 +591,17 @@ pub struct Trade<'info> {
     /// CHECK: fee vault PDA, address checked against launch state
     #[account(mut, address = launch.fee_vault)]
     pub fee_vault: UncheckedAccount<'info>,
-    /// CHECK: transfer-hook extra account metas for this mint
-    #[account(seeds = [b"extra-account-metas", mint.key().as_ref()], bump)]
+    /// CHECK: transfer-hook extra account metas for this mint (hook program PDA)
+    #[account(seeds = [b"extra-account-metas", mint.key().as_ref()], bump, seeds::program = UP_MEME_HOOK_ID)]
     pub extra_metas: UncheckedAccount<'info>,
-    /// CHECK: this program's executable account — appended to token CPIs so
-    /// token-2022 can re-enter the transfer hook
-    #[account(address = crate::ID)]
+    /// CHECK: the hook program's executable account — appended to token CPIs
+    /// so token-2022 can invoke the hook
+    #[account(address = UP_MEME_HOOK_ID)]
     pub hook_program: UncheckedAccount<'info>,
+    /// CHECK: THIS program's executable account — the hook's metas resolve it
+    /// as an extra account (the launch PDA derives under this program id)
+    #[account(address = crate::ID)]
+    pub up_meme_program: UncheckedAccount<'info>,
     /// required while the climb is open — checked in-handler
     #[account(seeds = [b"attest", trader.key().as_ref()], bump)]
     pub attestation: Option<Account<'info, Attestation>>,
@@ -610,24 +626,6 @@ pub struct ClaimFees<'info> {
     #[account(mut, address = config.protocol_vault)]
     pub protocol_vault: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
-}
-
-/// fixed account order dictated by the token-2022 transfer-hook CPI.
-#[derive(Accounts)]
-pub struct ExecuteHook<'info> {
-    /// CHECK: source token account — validated by the token program
-    pub source: UncheckedAccount<'info>,
-    /// CHECK: the mint — linked to the launch PDA via seeds
-    pub mint: UncheckedAccount<'info>,
-    /// CHECK: destination token account — validated by the token program
-    pub destination: UncheckedAccount<'info>,
-    /// CHECK: transfer authority — validated by the token program
-    pub owner: UncheckedAccount<'info>,
-    /// CHECK: extra account metas list for this mint
-    #[account(seeds = [b"extra-account-metas", mint.key().as_ref()], bump)]
-    pub extra_metas: UncheckedAccount<'info>,
-    #[account(seeds = [b"launch", mint.key().as_ref()], bump = launch.bump)]
-    pub launch: Account<'info, Launch>,
 }
 
 #[error_code]

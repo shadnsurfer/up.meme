@@ -32,3 +32,4 @@ dist-ssr
 anchor/target
 anchor/.anchor
 anchor/test-ledger
+anchor/dist-test
