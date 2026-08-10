@@ -20,5 +20,12 @@ url = "https://api.apr.dev"
 cluster = "Localnet"
 wallet = "~/.config/solana/id.json"
 
+# Meteora DAMM v2 (cp-amm), dumped from mainnet — the migration target for the
+# `migrate` integration test. re-dump with:
+#   solana program dump cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG tests/fixtures/cp_amm.so -u m
+[[test.genesis]]
+address = "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG"
+program = "tests/fixtures/cp_amm.so"
+
 [scripts]
 test = "npx tsc -p tsconfig.test.json && npx mocha -t 1000000 \"dist-test/**/*.js\""

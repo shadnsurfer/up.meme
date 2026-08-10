@@ -164,10 +164,11 @@ pub struct Launch {
     pub curve_bump: u8,
     pub sol_vault_bump: u8,
     pub fee_vault_bump: u8,
+    pub migrated: bool,
 }
 
 impl Launch {
-    pub const LEN: usize = 32 * 5 + 8 + 8 + 1 * 5;
+    pub const LEN: usize = 32 * 5 + 8 + 8 + 1 * 5 + 1;
 }
 
 #[error_code]

@@ -10,7 +10,9 @@ import {
 } from "@solana/web3.js";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
+  NATIVE_MINT,
   TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountInstruction,
   createTransferCheckedInstruction,
   getAccount,
@@ -50,8 +52,10 @@ describe("up-meme", () => {
   const third = Keypair.generate(); // buys post-climb, never attested
   const recipient = Keypair.generate(); // transfer target (no SOL needed)
 
-  // set by test (c), reused by (d)-(h)
+  // set by test (c), reused by (d)-(h), (j)
   let mint1: Keypair;
+  // set by test (i), reused by (j)-(l)
+  let mint2: Keypair;
 
   // ---- PDA helpers (seeds from lib.rs) ----
   const HOOK_PROGRAM_ID = new PublicKey("ws45kVaY6HcPrdrT6UP6WorwpviBPjnJbG7yjSkqeHN");
@@ -478,7 +482,7 @@ describe("up-meme", () => {
   // ------------------------------------------------------------------
   it("i. after climb end: buys need no attestation and transfers are free", async () => {
     const seedLamports = 500_000_000; // 0.5 SOL
-    const mint2 = await launchCoin(2, seedLamports); // 2-second climb
+    mint2 = await launchCoin(2, seedLamports); // 2-second climb
     const m2 = mint2.publicKey;
 
     // let the climb window lapse (local validator clock tracks wall time)
@@ -529,5 +533,192 @@ describe("up-meme", () => {
 
     const recipientAcct = await getAccount(connection, recipientAta2, "confirmed", TOKEN_2022_PROGRAM_ID);
     assert.strictEqual(recipientAcct.amount, 1_000n, "tokens moved freely after climb end");
+  });
+
+  // ------------------------------------------------------------------
+  // migration: Meteora DAMM v2 (cp-amm), loaded into the test validator via
+  // [[test.genesis]] (tests/fixtures/cp_amm.so, dumped from mainnet)
+
+  const CP_AMM = new PublicKey("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG");
+  const MIGRATION_RENT_BUDGET = 30_000_000n;
+  const MIN_SQRT = 4_295_048_016n;
+  const MAX_SQRT = 79_226_673_521_066_979_257_578_248_091n;
+
+  const cpPda = (...seeds: (Buffer | Uint8Array)[]) =>
+    PublicKey.findProgramAddressSync(seeds, CP_AMM)[0];
+  const maxKey = (a: PublicKey, b: PublicKey) =>
+    Buffer.compare(a.toBuffer(), b.toBuffer()) === 1 ? a : b;
+  const minKey = (a: PublicKey, b: PublicKey) =>
+    Buffer.compare(a.toBuffer(), b.toBuffer()) === 1 ? b : a;
+
+  function isqrt(n: bigint): bigint {
+    if (n === 0n) return 0n;
+    let x = n;
+    let y = (x + 1n) / 2n;
+    while (y < x) {
+      x = y;
+      y = (x + n / x) / 2n;
+    }
+    return x;
+  }
+
+  // exact replicas of the on-chain computations in lib.rs `migrate` — the
+  // program recomputes sqrt_price itself, so the client must match it for the
+  // liquidity floor-check to pass.
+  function migrationParams(A: bigint, B: bigint) {
+    const sqrtPrice = isqrt((B << 64n) / A) << 32n;
+    // cp-amm amounts from liquidity (ceil): a = L(√max-√P)/(√P√max),
+    // b = L(√P-√min)/2^128 — invert both with floor and take the min
+    const la = (A * sqrtPrice * MAX_SQRT) / (MAX_SQRT - sqrtPrice);
+    const lb = (B << 128n) / (sqrtPrice - MIN_SQRT);
+    let liquidity = la < lb ? la : lb;
+    const ceilDiv = (x: bigint, d: bigint) => (x + d - 1n) / d;
+    for (let i = 0; i < 4; i++) {
+      const impliedA = ceilDiv(liquidity * (MAX_SQRT - sqrtPrice), sqrtPrice * MAX_SQRT);
+      const impliedB = ceilDiv(liquidity * (sqrtPrice - MIN_SQRT), 1n << 128n);
+      if (impliedA <= A && impliedB <= B) break;
+      liquidity -= 1n;
+    }
+    return { sqrtPrice, liquidity };
+  }
+
+  function migrateAccounts(mint: PublicKey, positionNftMint: PublicKey) {
+    const vaultAuthority = vaultAuthorityPda(mint);
+    const pool = cpPda(str("cpool"), maxKey(mint, NATIVE_MINT).toBuffer(), minKey(mint, NATIVE_MINT).toBuffer());
+    return {
+      cranker: admin.publicKey,
+      launch: launchPda(mint),
+      mint,
+      curveTokenAccount: curvePda(mint),
+      vaultAuthority,
+      solVault: solVaultPda(mint),
+      feeVault: feeVaultPda(mint),
+      wsolAta: getAssociatedTokenAddressSync(NATIVE_MINT, vaultAuthority, true, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID),
+      wsolMint: NATIVE_MINT,
+      positionNftMint,
+      positionNftAccount: cpPda(str("position_nft_account"), positionNftMint.toBuffer()),
+      poolAuthority: cpPda(str("pool_authority")),
+      pool,
+      position: cpPda(str("position"), positionNftMint.toBuffer()),
+      tokenAVault: cpPda(str("token_vault"), mint.toBuffer(), pool.toBuffer()),
+      tokenBVault: cpPda(str("token_vault"), NATIVE_MINT.toBuffer(), pool.toBuffer()),
+      eventAuthority: cpPda(str("__event_authority")),
+      cpAmmProgram: CP_AMM,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      token2022Program: TOKEN_2022_PROGRAM_ID,
+      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    };
+  }
+
+  it("j. migrate before climb end is rejected (ClimbNotOver)", async () => {
+    const m = mint1.publicKey; // 1h climb, still open
+    const nft = Keypair.generate();
+    await expectFail(
+      program.methods
+        .migrate(new BN(1))
+        .accounts(migrateAccounts(m, nft.publicKey))
+        .preInstructions([cu(1_400_000)])
+        .signers([nft])
+        .rpc(),
+      "ClimbNotOver"
+    );
+  });
+
+  // ------------------------------------------------------------------
+  it("k. migrate: hook revoked forever, full-range pool seated + locked, token trades freely", async () => {
+    const m2 = mint2.publicKey;
+    const curve = curvePda(m2);
+    const solVault = solVaultPda(m2);
+
+    const A = (await getAccount(connection, curve, "confirmed", TOKEN_2022_PROGRAM_ID)).amount;
+    const solBal = BigInt(await connection.getBalance(solVault));
+    const B = solBal - RENT_FLOOR - MIGRATION_RENT_BUDGET;
+    assert.ok(A > 0n && B > 0n, "curve has both sides");
+
+    const { sqrtPrice, liquidity } = migrationParams(A, B);
+    const nft = Keypair.generate();
+    const accounts = migrateAccounts(m2, nft.publicKey);
+
+    const sig = await program.methods
+      .migrate(new BN(liquidity.toString()))
+      .accounts(accounts)
+      .preInstructions([cu(1_400_000)])
+      .signers([nft])
+      .rpc();
+    await confirm(sig);
+
+    // launch flagged migrated
+    const launch = await program.account.launch.fetch(launchPda(m2));
+    assert.strictEqual(launch.migrated, true, "launch.migrated");
+
+    // hook fully torn down: program id AND authority both None — the exact
+    // state DAMM v2's is_supported_mint requires, and irreversible by anyone
+    const mintInfo = await getMint(connection, m2, "confirmed", TOKEN_2022_PROGRAM_ID);
+    const hook = getTransferHook(mintInfo);
+    assert.ok(hook !== null, "hook extension still present (type can never be removed)");
+    assert.ok(hook!.programId.equals(PublicKey.default), "hook program id = None");
+    assert.ok(hook!.authority.equals(PublicKey.default), "hook authority revoked");
+
+    // pool + vaults exist, owned by cp-amm, holding (nearly) the full curve
+    const poolInfo = await connection.getAccountInfo(accounts.pool);
+    assert.ok(poolInfo !== null && poolInfo.owner.equals(CP_AMM), "pool owned by cp-amm");
+    const ceilDiv = (x: bigint, d: bigint) => (x + d - 1n) / d;
+    const expectedA = ceilDiv(liquidity * (MAX_SQRT - sqrtPrice), sqrtPrice * MAX_SQRT);
+    const expectedB = ceilDiv(liquidity * (sqrtPrice - MIN_SQRT), 1n << 128n);
+    const vaultA = await getAccount(connection, accounts.tokenAVault, "confirmed", TOKEN_2022_PROGRAM_ID);
+    const vaultB = await getAccount(connection, accounts.tokenBVault, "confirmed", TOKEN_PROGRAM_ID);
+    assert.strictEqual(vaultA.amount, expectedA, "token_a seated");
+    assert.strictEqual(vaultB.amount, expectedB, "token_b seated");
+    assert.ok(expectedA * 100n >= A * 99n, "pool got >= 99% of the token side");
+    assert.ok(expectedB * 100n >= B * 99n, "pool got >= 99% of the SOL side");
+
+    // the LP position nft sits in program custody (vault PDA)
+    const nftAcct = await getAccount(connection, accounts.positionNftAccount, "confirmed", TOKEN_2022_PROGRAM_ID);
+    assert.strictEqual(nftAcct.amount, 1n, "position nft minted");
+    assert.ok(nftAcct.owner.equals(vaultAuthorityPda(m2)), "position nft owned by vault PDA");
+
+    // sol vault left at the rent floor; rent-budget leftover went to fees
+    assert.strictEqual(await connection.getBalance(solVault), Number(RENT_FLOOR), "sol vault back to rent floor");
+
+    // the token now moves wallet-to-wallet with NO hook accounts appended —
+    // the hook is dead, the token is plain token-2022
+    const thirdAta = ataOf(m2, third.publicKey);
+    const recipientAta2 = ataOf(m2, recipient.publicKey);
+    const freeSig = await provider.sendAndConfirm(
+      new Transaction().add(
+        cu(200_000),
+        createTransferCheckedInstruction(
+          thirdAta, m2, recipientAta2, third.publicKey, 2_000, DECIMALS, [], TOKEN_2022_PROGRAM_ID
+        )
+      ),
+      [third]
+    );
+    await confirm(freeSig);
+    const recipientAcct = await getAccount(connection, recipientAta2, "confirmed", TOKEN_2022_PROGRAM_ID);
+    assert.strictEqual(recipientAcct.amount, 3_000n, "token moves freely after migration");
+  });
+
+  // ------------------------------------------------------------------
+  it("l. the curve is closed after migration (AlreadyMigrated)", async () => {
+    const m2 = mint2.publicKey;
+    await expectFail(
+      program.methods
+        .buy(new BN(10_000_000), new BN(0))
+        .accounts(tradeAccounts(m2, third.publicKey, null))
+        .preInstructions([cu(400_000)])
+        .signers([third])
+        .rpc(),
+      "AlreadyMigrated"
+    );
+    await expectFail(
+      program.methods
+        .sell(new BN(1_000), new BN(0))
+        .accounts(tradeAccounts(m2, third.publicKey, null))
+        .preInstructions([cu(400_000)])
+        .signers([third])
+        .rpc(),
+      "AlreadyMigrated"
+    );
   });
 });

@@ -24,6 +24,29 @@ pub const UP_MEME_HOOK_ID: Pubkey = pubkey!("ws45kVaY6HcPrdrT6UP6WorwpviBPjnJbG7
 /// matching anchor's `#[interface]` override on the hook side.
 pub const HOOK_INIT_METAS_DISCRIMINATOR: [u8; 8] = [43, 34, 13, 49, 167, 88, 235, 235];
 
+/// Meteora DAMM v2 (cp-amm) — the migration target. the only mainstream Solana
+/// AMM that (a) allows permissionless pool creation via CPI and (b) accepts a
+/// token-2022 mint carrying an INACTIVE transfer-hook extension — its
+/// is_supported_mint requires BOTH hook program id and hook authority to be
+/// None, which is exactly the teardown `migrate` performs. (Raydium CPMM/CLMM
+/// and Orca reject the extension outright or gate it behind admin badges.)
+pub const CP_AMM_ID: Pubkey = pubkey!("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG");
+
+/// lamports reserved out of the SOL vault at migration to pay cp-amm account
+/// rent (pool, position, nft mint/account, two token vaults). leftover is
+/// swept into the fee vault, where claim_fees splits it 50/50 as usual.
+pub const MIGRATION_RENT_BUDGET: u64 = 30_000_000; // 0.03 SOL
+
+/// full-range pool bounds, mirrored from cp-amm's constants.rs
+pub const MIN_SQRT_PRICE: u128 = 4_295_048_016;
+pub const MAX_SQRT_PRICE: u128 = 79_226_673_521_066_979_257_578_248_091;
+
+/// migration pool fee: constant 1% (fee numerator over cp-amm's 1e9
+/// denominator), matching the curve's FEE_BPS. fees accrue to the LP position,
+/// which the vault PDA custodies — a future instruction can crank-claim them
+/// into the same 50/50 split. permanently locked regardless.
+pub const POOL_FEE_NUMERATOR: u64 = 10_000_000;
+
 #[program]
 pub mod up_meme {
     use super::*;
@@ -282,6 +305,7 @@ pub mod up_meme {
     /// buy during the open market — or during the climb with an attestation.
     pub fn buy(ctx: Context<Trade>, lamports: u64, min_tokens_out: u64) -> Result<()> {
         let launch = &ctx.accounts.launch;
+        require!(!launch.migrated, UpError::AlreadyMigrated);
         let now = Clock::get()?.unix_timestamp;
         if now < launch.climb_end {
             require!(ctx.accounts.attestation.is_some(), UpError::NotAttested);
@@ -329,6 +353,7 @@ pub mod up_meme {
     /// acquisition, not exit.
     pub fn sell(ctx: Context<Trade>, token_amount: u64, min_sol_out: u64) -> Result<()> {
         let launch = &ctx.accounts.launch;
+        require!(!launch.migrated, UpError::AlreadyMigrated);
         require!(token_amount > 0, UpError::ZeroAmount);
 
         // reserves before this trade's tokens land
@@ -413,6 +438,257 @@ pub mod up_meme {
         )?;
         Ok(())
     }
+
+    /// permissionless migration crank, callable once the climb ends. tears the
+    /// transfer hook down FOREVER (program id None + authority revoked — the
+    /// exact state DAMM v2's mint check requires), then seats everything the
+    /// curve holds into a full-range Meteora DAMM v2 pool and permanently
+    /// locks the position. the LP nft lands in the vault PDA's custody and
+    /// this program has no withdraw instruction: the liquidity can never come
+    /// out. from here the token trades freely everywhere.
+    ///
+    /// the cranker supplies `liquidity` (the u256 math lives off-chain); the
+    /// opening price is computed here from real balances so no cranker can
+    /// skew it, and the liquidity is floor-checked so the pool can't be
+    /// seeded with dust while the rest stays locked. overshooting liquidity
+    /// simply reverts inside cp-amm's token transfers.
+    pub fn migrate(ctx: Context<Migrate>, liquidity: u128) -> Result<()> {
+        let launch = &mut ctx.accounts.launch;
+        require!(
+            Clock::get()?.unix_timestamp >= launch.climb_end,
+            UpError::ClimbNotOver
+        );
+        require!(!launch.migrated, UpError::AlreadyMigrated);
+        require!(liquidity > 0, UpError::InvalidLiquidity);
+
+        let token_a_amount = ctx.accounts.curve_token_account.amount;
+        require!(token_a_amount > 0, UpError::CurveEmpty);
+
+        let sol_balance = ctx.accounts.sol_vault.lamports();
+        let token_b_amount = sol_balance
+            .checked_sub(RENT_FLOOR + MIGRATION_RENT_BUDGET)
+            .ok_or(UpError::MigrationUnderfunded)?;
+        require!(token_b_amount > 0, UpError::MigrationUnderfunded);
+
+        // opening price: sqrt(token_b / token_a) as Q64.64 (raw units), from
+        // the curve's actual final state
+        let sqrt_price = sqrt_price_q64(token_b_amount, token_a_amount)?;
+        require!(
+            sqrt_price >= MIN_SQRT_PRICE && sqrt_price <= MAX_SQRT_PRICE,
+            UpError::InvalidPrice
+        );
+
+        // anti-grief floor, divide-first u128 approximations of cp-amm's u256
+        // math (relative error < 1e-12, far below the 1% tolerance):
+        //   implied_a = L*(√max-√P)/(√P*√max) ≈ L/√P
+        //   implied_b = L*(√P-√min)/2^128    ≈ (L/2^64)*√P/2^64
+        let approx_a = liquidity / sqrt_price;
+        let approx_b = ((liquidity >> 64) * sqrt_price) >> 64;
+        require!(
+            approx_a * 100 >= token_a_amount as u128 * 99,
+            UpError::LiquidityTooLow
+        );
+        require!(
+            approx_b * 100 >= token_b_amount as u128 * 99,
+            UpError::LiquidityTooLow
+        );
+
+        launch.migrated = true;
+
+        let mint_key = launch.mint;
+        let vault_seeds: &[&[u8]] = &[b"vault", mint_key.as_ref(), &[launch.vault_bump]];
+        let solvault_seeds: &[&[u8]] =
+            &[b"solvault", mint_key.as_ref(), &[launch.sol_vault_bump]];
+
+        // 1) hook program id -> None, 2) hook authority -> None (irreversible
+        // set_authority). after this nothing can ever re-gate the token.
+        invoke_signed(
+            &spl_token_2022::extension::transfer_hook::instruction::update(
+                &spl_token_2022::ID,
+                &mint_key,
+                &ctx.accounts.vault_authority.key(),
+                &[],
+                None,
+            )?,
+            &[
+                ctx.accounts.mint.to_account_info(),
+                ctx.accounts.vault_authority.to_account_info(),
+            ],
+            &[vault_seeds],
+        )?;
+        invoke_signed(
+            &spl_token_2022::instruction::set_authority(
+                &spl_token_2022::ID,
+                &mint_key,
+                None,
+                spl_token_2022::instruction::AuthorityType::TransferHookProgramId,
+                &ctx.accounts.vault_authority.key(),
+                &[],
+            )?,
+            &[
+                ctx.accounts.mint.to_account_info(),
+                ctx.accounts.vault_authority.to_account_info(),
+            ],
+            &[vault_seeds],
+        )?;
+
+        // fund the vault PDA: it acts as cp-amm's rent payer + transfer
+        // authority (a PDA satisfies Signer inside CPI via these seeds)
+        invoke_signed(
+            &system_instruction::transfer(
+                &ctx.accounts.sol_vault.key(),
+                &ctx.accounts.vault_authority.key(),
+                MIGRATION_RENT_BUDGET,
+            ),
+            &[
+                ctx.accounts.sol_vault.to_account_info(),
+                ctx.accounts.vault_authority.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+            &[solvault_seeds],
+        )?;
+
+        // wrap the rest of the curve's SOL into the vault PDA's WSOL ATA
+        invoke_signed(
+            &system_instruction::transfer(
+                &ctx.accounts.sol_vault.key(),
+                &ctx.accounts.wsol_ata.key(),
+                token_b_amount,
+            ),
+            &[
+                ctx.accounts.sol_vault.to_account_info(),
+                ctx.accounts.wsol_ata.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+            &[solvault_seeds],
+        )?;
+        invoke(
+            &anchor_spl::token::spl_token::instruction::sync_native(
+                &anchor_spl::token::spl_token::ID,
+                &ctx.accounts.wsol_ata.key(),
+            )?,
+            &[ctx.accounts.wsol_ata.to_account_info()],
+        )?;
+
+        // ---- cp-amm initialize_customizable_pool (hand-built: cp-amm is not
+        // a dependency; discriminators are anchor sighashes) ----
+        let mut data = sighash(b"global:initialize_customizable_pool").to_vec();
+        // PoolFeeParameters: BorshFeeTimeScheduler{cliff u64, periods u16,
+        // frequency u64, reduction u64, mode u8} + compounding u16 + pad u8 +
+        // dynamic_fee None — constant 1% fee, no scheduler, no dynamic fee
+        data.extend_from_slice(&POOL_FEE_NUMERATOR.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.push(0); // BaseFeeMode::FeeTimeSchedulerLinear
+        data.extend_from_slice(&0u16.to_le_bytes()); // compounding_fee_bps
+        data.push(0); // padding
+        data.push(0); // dynamic_fee = None
+        data.extend_from_slice(&MIN_SQRT_PRICE.to_le_bytes());
+        data.extend_from_slice(&MAX_SQRT_PRICE.to_le_bytes());
+        data.push(0); // has_alpha_vault = false
+        data.extend_from_slice(&liquidity.to_le_bytes());
+        data.extend_from_slice(&sqrt_price.to_le_bytes());
+        data.push(1); // ActivationType::Timestamp
+        data.push(0); // CollectFeeMode::BothToken
+        data.push(0); // activation_point = None -> activates immediately
+
+        let init_ix = Instruction {
+            program_id: CP_AMM_ID,
+            accounts: vec![
+                AccountMeta::new_readonly(ctx.accounts.vault_authority.key(), false), // creator
+                AccountMeta::new(ctx.accounts.position_nft_mint.key(), true),
+                AccountMeta::new(ctx.accounts.position_nft_account.key(), false),
+                AccountMeta::new(ctx.accounts.vault_authority.key(), true), // payer
+                AccountMeta::new_readonly(ctx.accounts.pool_authority.key(), false),
+                AccountMeta::new(ctx.accounts.pool.key(), false),
+                AccountMeta::new(ctx.accounts.position.key(), false),
+                AccountMeta::new_readonly(ctx.accounts.mint.key(), false), // token_a_mint
+                AccountMeta::new_readonly(ctx.accounts.wsol_mint.key(), false), // token_b_mint
+                AccountMeta::new(ctx.accounts.token_a_vault.key(), false),
+                AccountMeta::new(ctx.accounts.token_b_vault.key(), false),
+                AccountMeta::new(ctx.accounts.curve_token_account.key(), false), // payer_token_a
+                AccountMeta::new(ctx.accounts.wsol_ata.key(), false), // payer_token_b
+                AccountMeta::new_readonly(ctx.accounts.token_2022_program.key(), false),
+                AccountMeta::new_readonly(ctx.accounts.token_program.key(), false),
+                AccountMeta::new_readonly(ctx.accounts.token_2022_program.key(), false),
+                AccountMeta::new_readonly(anchor_lang::solana_program::system_program::ID, false),
+                AccountMeta::new_readonly(ctx.accounts.event_authority.key(), false),
+                AccountMeta::new_readonly(CP_AMM_ID, false),
+            ],
+            data,
+        };
+        invoke_signed(
+            &init_ix,
+            &[
+                ctx.accounts.vault_authority.to_account_info(),
+                ctx.accounts.position_nft_mint.to_account_info(),
+                ctx.accounts.position_nft_account.to_account_info(),
+                ctx.accounts.pool_authority.to_account_info(),
+                ctx.accounts.pool.to_account_info(),
+                ctx.accounts.position.to_account_info(),
+                ctx.accounts.mint.to_account_info(),
+                ctx.accounts.wsol_mint.to_account_info(),
+                ctx.accounts.token_a_vault.to_account_info(),
+                ctx.accounts.token_b_vault.to_account_info(),
+                ctx.accounts.curve_token_account.to_account_info(),
+                ctx.accounts.wsol_ata.to_account_info(),
+                ctx.accounts.token_2022_program.to_account_info(),
+                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.event_authority.to_account_info(),
+                ctx.accounts.cp_amm_program.to_account_info(),
+            ],
+            &[vault_seeds],
+        )?;
+
+        // permanently lock the full position — publicly verifiable locked LP
+        // on every DAMM-integrated UI, not just implied by PDA custody
+        let mut lock_data = sighash(b"global:permanent_lock_position").to_vec();
+        lock_data.extend_from_slice(&liquidity.to_le_bytes());
+        invoke_signed(
+            &Instruction {
+                program_id: CP_AMM_ID,
+                accounts: vec![
+                    AccountMeta::new(ctx.accounts.pool.key(), false),
+                    AccountMeta::new(ctx.accounts.position.key(), false),
+                    AccountMeta::new_readonly(ctx.accounts.position_nft_account.key(), false),
+                    AccountMeta::new_readonly(ctx.accounts.vault_authority.key(), true), // signer
+                    AccountMeta::new_readonly(ctx.accounts.event_authority.key(), false),
+                    AccountMeta::new_readonly(CP_AMM_ID, false),
+                ],
+                data: lock_data,
+            },
+            &[
+                ctx.accounts.pool.to_account_info(),
+                ctx.accounts.position.to_account_info(),
+                ctx.accounts.position_nft_account.to_account_info(),
+                ctx.accounts.vault_authority.to_account_info(),
+                ctx.accounts.event_authority.to_account_info(),
+                ctx.accounts.cp_amm_program.to_account_info(),
+            ],
+            &[vault_seeds],
+        )?;
+
+        // rent-budget leftover -> fee vault (50/50 split via claim_fees)
+        let leftover = ctx.accounts.vault_authority.lamports();
+        if leftover > 0 {
+            invoke_signed(
+                &system_instruction::transfer(
+                    &ctx.accounts.vault_authority.key(),
+                    &ctx.accounts.fee_vault.key(),
+                    leftover,
+                ),
+                &[
+                    ctx.accounts.vault_authority.to_account_info(),
+                    ctx.accounts.fee_vault.to_account_info(),
+                    ctx.accounts.system_program.to_account_info(),
+                ],
+                &[vault_seeds],
+            )?;
+        }
+        Ok(())
+    }
 }
 
 // NOTE: the transfer-hook `execute` entrypoint lives in the `up_meme_hook`
@@ -440,6 +716,39 @@ fn sell_sol_out(x: u64, y: u64, dy: u64) -> Result<u64> {
 /// effective SOL side of the curve: virtual offset + real lamports above the rent floor.
 fn reserve_sol(launch: &Launch, vault_lamports: u64) -> u64 {
     launch.virtual_sol + vault_lamports.saturating_sub(RENT_FLOOR)
+}
+
+/// anchor instruction sighash: sha256(name)[..8], computed at runtime so this
+/// file can't silently drift from cp-amm's interface.
+fn sighash(name: &[u8]) -> [u8; 8] {
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&anchor_lang::solana_program::hash::hash(name).to_bytes()[..8]);
+    out
+}
+
+/// sqrt(b/a) as a Q64.64 fixed-point, cp-amm's price convention (raw b per
+/// raw a). computed as isqrt(b*2^64/a) * 2^32: two steps keep every
+/// intermediate inside u128 (b is lamports, always < 2^64, so b<<64 < 2^128).
+/// relative error vs the true value is ~1e-13 — no exploitable skew.
+fn sqrt_price_q64(b: u64, a: u64) -> Result<u128> {
+    let q = ((b as u128) << 64)
+        .checked_div(a as u128)
+        .ok_or(UpError::MathOverflow)?;
+    Ok(isqrt(q) << 32)
+}
+
+/// floor square root of a u128, Newton's method.
+fn isqrt(n: u128) -> u128 {
+    if n == 0 {
+        return 0;
+    }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
 }
 
 /// token-2022 transfer that fires the transfer hook. anchor-spl's
@@ -628,6 +937,75 @@ pub struct ClaimFees<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(Accounts)]
+pub struct Migrate<'info> {
+    /// permissionless crank — pays the tx fee (+ WSOL ATA rent) and brings the
+    /// fresh position-nft keypair signature. receives nothing.
+    #[account(mut)]
+    pub cranker: Signer<'info>,
+    #[account(mut, seeds = [b"launch", mint.key().as_ref()], bump = launch.bump)]
+    pub launch: Account<'info, Launch>,
+    #[account(mut, address = launch.mint)]
+    pub mint: InterfaceAccount<'info, Mint>,
+    #[account(mut, address = launch.curve_token_account)]
+    pub curve_token_account: InterfaceAccount<'info, TokenAccount>,
+    /// CHECK: mint/hook authority PDA — signs the hook teardown and acts as
+    /// cp-amm's creator+payer, so the LP position nft lands in program custody
+    #[account(mut, seeds = [b"vault", mint.key().as_ref()], bump = launch.vault_bump)]
+    pub vault_authority: UncheckedAccount<'info>,
+    /// CHECK: SOL vault, drained into the pool (above the rent floor + budget)
+    #[account(mut, address = launch.sol_vault)]
+    pub sol_vault: UncheckedAccount<'info>,
+    /// CHECK: fee vault — receives the rent-budget leftover
+    #[account(mut, address = launch.fee_vault)]
+    pub fee_vault: UncheckedAccount<'info>,
+    /// vault PDA's WSOL ATA — wrapped in-handler, then drained into the pool
+    /// as token_b. cranker-paid: the ATA stays behind with zero balance.
+    #[account(
+        init_if_needed,
+        payer = cranker,
+        associated_token::mint = wsol_mint,
+        associated_token::authority = vault_authority,
+        associated_token::token_program = token_program,
+    )]
+    pub wsol_ata: InterfaceAccount<'info, TokenAccount>,
+    #[account(address = anchor_spl::token::spl_token::native_mint::ID)]
+    pub wsol_mint: InterfaceAccount<'info, Mint>,
+    /// fresh keypair per migration — cp-amm's position nft mint must be a
+    /// signer, so the cranker generates and signs with it
+    #[account(mut)]
+    pub position_nft_mint: Signer<'info>,
+    // ---- cp-amm pass-throughs: cp-amm's own seed/address constraints
+    // validate every one of these; a wrong account just reverts the tx ----
+    /// CHECK: [b"position_nft_account", position_nft_mint] under cp-amm
+    #[account(mut)]
+    pub position_nft_account: UncheckedAccount<'info>,
+    /// CHECK: cp-amm's constant pool authority PDA [b"pool_authority"]
+    pub pool_authority: UncheckedAccount<'info>,
+    /// CHECK: [b"cpool", max(mint, wsol), min(mint, wsol)] under cp-amm
+    #[account(mut)]
+    pub pool: UncheckedAccount<'info>,
+    /// CHECK: [b"position", position_nft_mint] under cp-amm
+    #[account(mut)]
+    pub position: UncheckedAccount<'info>,
+    /// CHECK: [b"token_vault", mint, pool] under cp-amm
+    #[account(mut)]
+    pub token_a_vault: UncheckedAccount<'info>,
+    /// CHECK: [b"token_vault", wsol, pool] under cp-amm
+    #[account(mut)]
+    pub token_b_vault: UncheckedAccount<'info>,
+    /// CHECK: cp-amm event authority [b"__event_authority"]
+    pub event_authority: UncheckedAccount<'info>,
+    /// CHECK: the cp-amm program itself
+    #[account(address = CP_AMM_ID)]
+    pub cp_amm_program: UncheckedAccount<'info>,
+    /// classic token program (WSOL side)
+    pub token_program: Program<'info, anchor_spl::token::Token>,
+    pub token_2022_program: Program<'info, Token2022>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+}
+
 #[error_code]
 pub enum UpError {
     #[msg("wallet is not attested — a pump.fun profile is required during the climb")]
@@ -646,4 +1024,18 @@ pub enum UpError {
     ClimbTransfersLocked,
     #[msg("a seed buy is required — one wallet deploys, one wallet seeds")]
     SeedRequired,
+    #[msg("the climb is still open — migration unlocks at climb end")]
+    ClimbNotOver,
+    #[msg("this launch has already migrated — the curve is closed, trade on the open market")]
+    AlreadyMigrated,
+    #[msg("the curve's SOL vault can't cover migration rent — buy pressure first")]
+    MigrationUnderfunded,
+    #[msg("the curve is empty — nothing to migrate")]
+    CurveEmpty,
+    #[msg("liquidity must be greater than zero")]
+    InvalidLiquidity,
+    #[msg("liquidity too low — the pool must seat (nearly) the full curve")]
+    LiquidityTooLow,
+    #[msg("computed pool price is outside the supported range")]
+    InvalidPrice,
 }

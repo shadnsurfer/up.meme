@@ -46,10 +46,14 @@ pub struct Launch {
     pub curve_bump: u8,
     pub sol_vault_bump: u8,
     pub fee_vault_bump: u8,
+    /// set by the permissionless `migrate` crank: hook torn down, liquidity
+    /// seated in a DAMM v2 pool. buy/sell on the curve stop existing here.
+    /// keep LAST and keep the hook program's mirror struct in sync.
+    pub migrated: bool,
 }
 
 impl Launch {
-    pub const LEN: usize = 32 * 5 + 8 + 8 + 1 * 5;
+    pub const LEN: usize = 32 * 5 + 8 + 8 + 1 * 5 + 1;
 
     pub fn seeds<'a>(mint: &'a Pubkey) -> [&'a [u8]; 2] {
         [b"launch", mint.as_ref()]
