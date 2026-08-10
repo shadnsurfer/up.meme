@@ -90,7 +90,11 @@ pub mod up_meme {
             &spl_token_2022::extension::transfer_hook::instruction::initialize(
                 &spl_token_2022::ID,
                 &mint.key(),
-                None, // hook program is immutable — no update authority
+                // hook authority = the program's vault PDA. the hook can never
+                // be retargeted to another program — the only update the
+                // program ever signs is setting the hook id to None at
+                // migration, permanently disabling it after the climb.
+                Some(ctx.accounts.vault_authority.key()),
                 Some(crate::ID),
             )?,
             &[mint.to_account_info()],
