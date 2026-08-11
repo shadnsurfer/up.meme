@@ -41,6 +41,13 @@ fully disabled.
 gating, hook enforcement, fee splits, climb lapse, and the complete
 migration against the actual DAMM v2 program.
 
+`anchor/scripts/e2e-localnet.sh` goes further: the full lifecycle through the
+**real production code paths** — the frontend's instruction builders and
+fetchers (`src/lib/tx.ts`, `chain.ts`, `attest.ts`) and the real verifier
+server (with a stubbed pump.fun API behind it) — 22 checks covering attested
+buys, `NotAttested` rejections, sells, climb lapse, the migrate crank,
+`AlreadyMigrated`, the exact 50/50 fee split, and launch-metadata recovery.
+
 ## Deploy (devnet)
 
 ```
@@ -51,3 +58,7 @@ Deploys both programs and initializes the Config PDA (idempotent). Requires
 ~5 devnet SOL in `~/.config/solana/id.json`. See
 `scripts/initialize-config.ts` for the env knobs (attestation authority,
 protocol vault).
+
+**Ops note:** the attestation authority wallet (the verifier's
+`ATTESTATION_AUTHORITY_SECRET`) must hold a SOL balance on the target
+cluster — it pays rent for each attestation PDA it creates.
