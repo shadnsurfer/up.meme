@@ -7,6 +7,17 @@ import { hasAttestation, submitAttestation } from './programClient.js';
 const app = express();
 app.use(express.json());
 
+// CORS: the frontend is served from a different origin in prod (up.meme).
+// These endpoints are public, wallet-scoped, and carry no cookies, so any
+// origin is fine; abuse is handled by the rate limiter below.
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 // --- naive in-memory rate limit: 30 req/min per ip, 5 attest attempts/hr per wallet ---
 const buckets = new Map<string, { count: number; resetAt: number }>();
 function limited(key: string, max: number, windowMs: number): boolean {
