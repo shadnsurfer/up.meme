@@ -15,6 +15,10 @@
  * through the verifier, which only attests wallets that have a pump.fun
  * profile.
  *
+ * Cluster-agnostic despite the filename: the VITE_SOLANA_RPC define picks the
+ * cluster (devnet below; https://api.mainnet-beta.solana.com for mainnet), and
+ * UPMEME_META_URI overrides the token metadata URI (default: the local stub).
+ *
  * Run from anchor/:
  *   npx esbuild scripts/devnet-test-launch.ts --bundle --platform=node \
  *     --format=esm --outfile=/tmp/upmeme-test-launch.mjs \
@@ -74,7 +78,7 @@ const CLIMB_SECONDS = 86_400n; // 24h — long window for manual multi-wallet te
 const SEED = SOL / 10n; // 0.1 SOL dev buy
 const NAME = 'UP Migration Test';
 const SYMBOL = 'UPTEST';
-const URI = 'http://127.0.0.1:8791/meta.json'; // meta stub, serves name/symbol/image
+const URI = process.env.UPMEME_META_URI ?? 'http://127.0.0.1:8791/meta.json'; // local stub unless overridden
 /** expected attestation authority (initialized into the devnet config) */
 const EXPECTED_AUTHORITY = kitAddress('FjYoBSRYtsLn87vN6JwHgDAPLJSngMhWf2L7x3NAGAEh');
 
