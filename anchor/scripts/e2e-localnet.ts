@@ -17,7 +17,7 @@
  *   UPMEME_ROOT — repo root (for spawning server/)
  */
 import http from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -199,36 +199,44 @@ async function main() {
   });
   await new Promise<void>((r) => stub.listen(STUB_PORT, '127.0.0.1', () => r()));
 
-  // --- attestation authority keypair (shared with the verifier via env) ---
-  const verifierSeed = globalThis.crypto.getRandomValues(new Uint8Array(32));
-  const verifierSigner = await createKeyPairSignerFromPrivateKeyBytes(verifierSeed);
-  const secret64 = new Uint8Array(64);
-  secret64.set(verifierSeed);
-  secret64.set(getAddressEncoder().encode(verifierSigner.address), 32);
-  const verifierSecret58 = getBase58Decoder().decode(secret64) as string; // kit v7: decoder = bytes → base58 text
+  // --- attestation authority + verifier server ---
+  // localnet: generate a throwaway authority and spawn the server ourselves.
+  // devnet (E2E_MODE=devnet): the program config is already initialized with
+  // the authority from server/.env, and the verifier runs as an external
+  // process — the harness only drives HTTP + chain against both.
+  const DEVNET = process.env.E2E_MODE === 'devnet';
+  let serverProc: ChildProcess | null = null;
+  let verifierSigner: KeyPairSigner | null = null;
+  if (!DEVNET) {
+    const verifierSeed = globalThis.crypto.getRandomValues(new Uint8Array(32));
+    verifierSigner = await createKeyPairSignerFromPrivateKeyBytes(verifierSeed);
+    const secret64 = new Uint8Array(64);
+    secret64.set(verifierSeed);
+    secret64.set(getAddressEncoder().encode(verifierSigner.address), 32);
+    const verifierSecret58 = getBase58Decoder().decode(secret64) as string; // kit v7: decoder = bytes → base58 text
 
-  // --- real verifier server, pointed at localnet + the profile stub ---
-  const serverProc = spawn('npx', ['tsx', 'src/index.ts'], {
-    cwd: path.join(ROOT, 'server'),
-    env: {
-      ...process.env,
-      PORT: String(VERIFIER_PORT),
-      SOLANA_RPC_URL: 'http://127.0.0.1:8899',
-      UP_MEME_PROGRAM_ID: UP_MEME_PROGRAM as string,
-      ATTESTATION_AUTHORITY_SECRET: verifierSecret58,
-      PUMPFUN_API_BASE: `http://127.0.0.1:${STUB_PORT}`,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  serverProc.stdout.on('data', (d) => process.stdout.write(`[verifier] ${d}`));
-  serverProc.stderr.on('data', (d) => process.stdout.write(`[verifier:err] ${d}`));
-  process.on('exit', () => {
-    try {
-      serverProc.kill();
-    } catch {
-      /* already gone */
-    }
-  });
+    serverProc = spawn('npx', ['tsx', 'src/index.ts'], {
+      cwd: path.join(ROOT, 'server'),
+      env: {
+        ...process.env,
+        PORT: String(VERIFIER_PORT),
+        SOLANA_RPC_URL: 'http://127.0.0.1:8899',
+        UP_MEME_PROGRAM_ID: UP_MEME_PROGRAM as string,
+        ATTESTATION_AUTHORITY_SECRET: verifierSecret58,
+        PUMPFUN_API_BASE: `http://127.0.0.1:${STUB_PORT}`,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    serverProc.stdout.on('data', (d) => process.stdout.write(`[verifier] ${d}`));
+    serverProc.stderr.on('data', (d) => process.stdout.write(`[verifier:err] ${d}`));
+    process.on('exit', () => {
+      try {
+        serverProc?.kill();
+      } catch {
+        /* already gone */
+      }
+    });
+  }
 
   let protocolVaultAddr: Address = kitAddress('11111111111111111111111111111111'); // replaced in initialize_config step
   try {
@@ -259,22 +267,50 @@ async function main() {
     profiles.add(creator.address as string);
     profiles.add(buyer.address as string);
 
-    step('fund wallets (localnet airdrops)');
-    await airdrop(creator.address, 30);
-    await airdrop(buyer.address, 5);
-    await airdrop(stranger.address, 2);
-    await airdrop(third.address, 2);
-    await airdrop(verifierSigner.address, 1); // pays rent for attestation PDAs
-    check('airdrops landed', (await fetchSolBalance(buyer.address)) >= 5n * SOL);
+    step(DEVNET ? 'fund wallets (transfer from deploy wallet)' : 'fund wallets (localnet airdrops)');
+    if (DEVNET) {
+      // devnet faucet is unusable — fund the throwaway wallets from the deploy wallet
+      const transfer = (to: Address, lamportsV: bigint): Instruction => {
+        const data = new Uint8Array(12);
+        const dv = new DataView(data.buffer);
+        dv.setUint32(0, 2, true); // SystemInstruction::Transfer
+        dv.setBigUint64(4, lamportsV, true);
+        return {
+          programAddress: SYSTEM_PROGRAM,
+          accounts: [
+            { address: creator.address, role: AccountRole.WRITABLE_SIGNER },
+            { address: to, role: AccountRole.WRITABLE },
+          ],
+          data,
+        };
+      };
+      await mustSend(creator, [
+        transfer(buyer.address, 2n * SOL),
+        transfer(stranger.address, SOL / 2n),
+        transfer(third.address, SOL / 2n),
+      ]);
+      check('transfers landed', (await fetchSolBalance(buyer.address)) >= 2n * SOL);
+    } else {
+      await airdrop(creator.address, 30);
+      await airdrop(buyer.address, 5);
+      await airdrop(stranger.address, 2);
+      await airdrop(third.address, 2);
+      await airdrop(verifierSigner!.address, 1); // pays rent for attestation PDAs
+      check('airdrops landed', (await fetchSolBalance(buyer.address)) >= 5n * SOL);
+    }
 
     // --- config ---
-    step('initialize_config (attestation authority = verifier key)');
-    {
+    step(DEVNET ? 'config (already initialized on devnet)' : 'initialize_config (attestation authority = verifier key)');
+    if (DEVNET) {
+      const cfg = await fetchConfig();
+      check('config readable via chain.ts', cfg !== null, cfg?.protocolVault);
+      protocolVaultAddr = cfg!.protocolVault;
+    } else {
       const disc = createHash('sha256').update('global:initialize_config').digest().subarray(0, 8);
       const protocolVault = await generateKeyPairSigner();
       const data = new Uint8Array(72);
       data.set(disc, 0);
-      data.set(getAddressEncoder().encode(verifierSigner.address), 8);
+      data.set(getAddressEncoder().encode(verifierSigner!.address), 8);
       data.set(getAddressEncoder().encode(protocolVault.address), 40);
       const initIx: Instruction = {
         programAddress: UP_MEME_PROGRAM,
@@ -434,12 +470,22 @@ async function main() {
       await mustSend(creator, [ix], { cu: CU.claimFees });
       const protocolDelta = (await fetchSolBalance(protocolVaultAddr)) - protocolBefore;
       const creatorDelta = (await fetchSolBalance(creator.address)) - creatorBefore;
-      check('protocol got claimable - half', protocolDelta === claimable - half, `${protocolDelta}`);
-      check(
-        'creator got ~half (minus tx fee)',
-        creatorDelta >= half - 50_000n && creatorDelta <= half,
-        `${creatorDelta} vs half ${half}`,
-      );
+      if (protocolVaultAddr === creator.address) {
+        // devnet placeholder config: both shares land in the deploy wallet —
+        // expect the full claimable minus the tx fee
+        check(
+          'creator+protocol same wallet: full claimable minus tx fee',
+          protocolDelta >= claimable - 60_000n && protocolDelta <= claimable,
+          `${protocolDelta} vs claimable ${claimable}`,
+        );
+      } else {
+        check('protocol got claimable - half', protocolDelta === claimable - half, `${protocolDelta}`);
+        check(
+          'creator got ~half (minus tx fee)',
+          creatorDelta >= half - 50_000n && creatorDelta <= half,
+          `${creatorDelta} vs half ${half}`,
+        );
+      }
     }
 
     // --- read-side: list + metadata recovery ---
@@ -459,7 +505,7 @@ async function main() {
       );
     }
   } finally {
-    serverProc.kill();
+    serverProc?.kill();
     stub.close();
   }
 
